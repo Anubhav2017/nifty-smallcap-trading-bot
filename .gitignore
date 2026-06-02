@@ -1,0 +1,14 @@
+.venv/
+.pkgs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+dataset_smallcap250/*
+dataset_nifty50/*
+models/
+*.log
+.env
