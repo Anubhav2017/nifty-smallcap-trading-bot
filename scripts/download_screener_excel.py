@@ -13,7 +13,7 @@ from typing import Any, List, Optional
 
 from dataset_config import load_dataset_config, load_universe_symbols
 from download_config import load_symbols_from_csv
-from env_utils import load_env_file, resolve_repo_path
+from env_utils import load_env_file, repo_root, resolve_repo_path
 from screener_client import (
     ScreenerAuthError,
     ScreenerError,
@@ -75,6 +75,102 @@ def load_screener_config(path: Path) -> ScreenerDownloadConfig:
         rate_limit_base_seconds=float(raw.get("rate_limit_base_seconds", 30)),
         request_pause_seconds=float(raw.get("request_pause_seconds", 0.75)),
     )
+
+
+def _cookie_source_label(cfg: ScreenerDownloadConfig) -> str:
+    if cfg.cookies_file is not None:
+        return str(cfg.cookies_file)
+    return "SCREENER_SESSIONID (.env)"
+
+
+def _missing_required_cookies(path: Path) -> list[str]:
+    """Return required cookie names absent from a Netscape cookies.txt file."""
+    found: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) == 7:
+            found.add(parts[5].strip().lower())
+    return sorted({"sessionid", "csrftoken"} - found)
+
+
+def check_screener_session(
+    cfg: ScreenerDownloadConfig,
+    *,
+    probe_export: bool = False,
+    probe_symbol: str = "RELIANCE",
+) -> None:
+    """Validate Screener cookies (login page + optional Excel export probe).
+
+    Raises SystemExit with actionable guidance when cookies are missing or invalid.
+    """
+    import os
+
+    source = _cookie_source_label(cfg)
+    if cfg.cookies_file is not None:
+        if not cfg.cookies_file.is_file():
+            raise SystemExit(
+                f"Screener cookies file not found: {cfg.cookies_file}\n"
+                "Log in at https://www.screener.in, export Netscape-format cookies, "
+                "and save them to screener_cookies.txt in the project root."
+            )
+        missing = _missing_required_cookies(cfg.cookies_file)
+        if missing:
+            raise SystemExit(
+                f"Screener cookies file is missing required entries: {', '.join(missing)}\n"
+                f"File: {cfg.cookies_file}\n"
+                "Re-export cookies from your browser after logging in at https://www.screener.in"
+            )
+    elif not os.getenv("SCREENER_SESSIONID", "").strip():
+        raise SystemExit(
+            "No Screener cookies configured.\n"
+            "Save screener_cookies.txt in the project root or set SCREENER_SESSIONID in .env"
+        )
+
+    client = ScreenerSession(
+        cookies_file=cfg.cookies_file,
+        rate_limit_max_retries=cfg.rate_limit_max_retries,
+        rate_limit_base_seconds=cfg.rate_limit_base_seconds,
+        request_pause_seconds=cfg.request_pause_seconds,
+    )
+    try:
+        client.verify_logged_in()
+    except ScreenerAuthError as exc:
+        raise SystemExit(
+            f"Screener login check failed: {exc}\n"
+            f"Update cookies at {source} and try again."
+        ) from exc
+
+    print(f"  Login: OK (watchlist accessible)")
+
+    if probe_export:
+        try:
+            ref = client.resolve_company(probe_symbol, consolidated=cfg.consolidated)
+            content = client.export_excel(ref)
+        except ScreenerAuthError as exc:
+            raise SystemExit(
+                f"Screener login OK but Excel export failed (auth): {exc}\n"
+                f"Refresh cookies at {source}."
+            ) from exc
+        except ScreenerNotFoundError as exc:
+            raise SystemExit(f"Export probe symbol not found: {exc}") from exc
+        except ScreenerExportError as exc:
+            raise SystemExit(
+                f"Screener login OK but Excel export failed: {exc}\n"
+                "Ensure your Screener.in account can export Excel files."
+            ) from exc
+        except ScreenerError as exc:
+            raise SystemExit(f"Screener export probe failed: {exc}") from exc
+
+        label = "consolidated" if ref.consolidated else "standalone"
+        print(
+            f"  Export probe ({probe_symbol}): OK "
+            f"({len(content) // 1024} KB, {label})"
+        )
+
+    print(f"Screener cookies OK (source: {source})")
 
 
 def _output_path(output_dir: Path, symbol: str, consolidated: bool) -> Path:
@@ -196,13 +292,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("config/screener.smallcap250.json"),
+        default=repo_root() / "config/screener.smallcap250.json",
         help="Screener download config JSON",
     )
     parser.add_argument(
         "--check-session",
         action="store_true",
-        help="Verify Screener login and exit",
+        help="Verify Screener login (and Excel export) and exit",
+    )
+    parser.add_argument(
+        "--probe-export",
+        action="store_true",
+        help="With --check-session, also download a sample Excel export",
+    )
+    parser.add_argument(
+        "--probe-symbol",
+        default="RELIANCE",
+        help="Symbol used for --probe-export (default: RELIANCE)",
     )
     return parser.parse_args()
 
@@ -213,8 +319,11 @@ def main() -> None:
     cfg = load_screener_config(args.config.resolve())
 
     if args.check_session:
-        client = ScreenerSession(cookies_file=cfg.cookies_file)
-        print(client.verify_logged_in())
+        check_screener_session(
+            cfg,
+            probe_export=args.probe_export,
+            probe_symbol=args.probe_symbol.upper(),
+        )
         return
 
     run_download(cfg)

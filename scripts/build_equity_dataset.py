@@ -50,35 +50,10 @@ def validate_screener_session(cfg: DatasetBuildConfig) -> None:
     if not cfg.screener_config.is_file():
         raise SystemExit(f"Screener config not found: {cfg.screener_config}")
 
-    from download_screener_excel import load_screener_config
-    from screener_client import ScreenerAuthError, ScreenerSession
+    from download_screener_excel import check_screener_session, load_screener_config
 
     screener_cfg = load_screener_config(cfg.screener_config)
-    cookies = screener_cfg.cookies_file
-    if cookies is not None and not cookies.is_file():
-        raise SystemExit(
-            f"Screener cookies file not found: {cookies}\n"
-            "Log in at https://www.screener.in, export cookies (sessionid, csrftoken), "
-            "and save them to the path in screener_config (cookies_file)."
-        )
-
-    client = ScreenerSession(
-        cookies_file=cookies,
-        rate_limit_max_retries=screener_cfg.rate_limit_max_retries,
-        rate_limit_base_seconds=screener_cfg.rate_limit_base_seconds,
-        request_pause_seconds=screener_cfg.request_pause_seconds,
-    )
-    try:
-        label = client.verify_logged_in()
-    except ScreenerAuthError as exc:
-        src = str(cookies) if cookies else "SCREENER_SESSIONID in .env"
-        raise SystemExit(
-            f"Screener session invalid: {exc}\n"
-            f"Update cookies at {src} after logging in at https://www.screener.in"
-        ) from exc
-
-    src = str(cookies) if cookies else "SCREENER_SESSIONID (.env)"
-    print(f"Screener session OK ({label}, source: {src})")
+    check_screener_session(screener_cfg, probe_export=False)
 
 
 def run_preflight_checks(
