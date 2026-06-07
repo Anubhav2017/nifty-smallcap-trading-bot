@@ -1,0 +1,16 @@
+{
+  "symbols_from": "config/dataset.nifty50.json",
+  "output_dir": "dataset_nifty50/bse_announcements",
+  "years_back": 3,
+  "categories": "relevant",
+  "download_pdfs": true,
+  "max_workers": 4,
+  "pdf_workers": 8,
+  "sleep_seconds": 0,
+  "page_sleep_seconds": 0.3,
+  "pdf_sleep_seconds": 0.05,
+  "skip_existing": true,
+  "show_progress": true,
+  "retry_until_complete": true,
+  "retry_wait_seconds": 600
+}

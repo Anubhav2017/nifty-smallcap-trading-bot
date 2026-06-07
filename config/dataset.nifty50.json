@@ -1,0 +1,15 @@
+{
+  "dataset_root": "dataset_nifty50",
+  "universe_name": "nifty50",
+  "symbols_csv": "universe/nifty50.csv",
+  "symbol_column": "symbol",
+  "nse_constituents_url": "https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv",
+  "refresh_universe_from_nse": true,
+  "years_back": 3,
+  "intervals": ["day", "minute"],
+  "sleep_seconds": 0.4,
+  "skip_existing": true,
+  "save_instruments": true,
+  "bse_config": "config/bse.nifty50.json",
+  "screener_config": "config/screener.nifty50.json"
+}

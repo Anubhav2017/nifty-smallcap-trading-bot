@@ -1,0 +1,16 @@
+{
+  "dataset_root": "dataset_smallcap250",
+  "universe_name": "nifty_smallcap250",
+  "symbols_csv": "universe/nifty_smallcap250.csv",
+  "symbol_column": "symbol",
+  "nse_constituents_url": "https://nsearchives.nseindia.com/content/indices/ind_niftysmallcap250list.csv",
+  "refresh_universe_from_nse": true,
+  "from_date": "2021-06-01",
+  "to_date": "2026-06-01",
+  "intervals": ["day", "minute"],
+  "sleep_seconds": 0.4,
+  "skip_existing": true,
+  "save_instruments": true,
+  "bse_config": "config/bse.smallcap250.json",
+  "screener_config": "config/screener.smallcap250.json"
+}

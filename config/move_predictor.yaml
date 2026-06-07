@@ -11,7 +11,7 @@ move_predictor:
   train_end: "2024-12-31"
   backtest_start: "2025-01-01"
   backtest_end: "2026-06-05"          # extended to latest available data (liquidity filter uses as_of_date)
-  top_n: 5                          # quality over quantity — top 5 model picks per day
+  top_n: 2                          # was 5 — quality filter: only top-2 model picks/day (rank 3-5 are noise)
   min_volume_ratio: 1.5          # lagged volume vs 20d avg (universe playbook)
   label_min_move_pct: 1.5        # train label: next-day return >= this
   min_model_score: 0.0            # rank-only; big-move probs sit ~20-30%
@@ -43,7 +43,7 @@ exit:
 
 risk:
   risk_per_trade_pct: 0.75
-  max_daily_entries: 5            # reverted — quality over quantity, regime filter handles bad days
+  max_daily_entries: 2            # matches top_n — prevents rank 3-5 from slipping through via breakout capital
   max_gross_exposure_pct: 80.0
   max_position_pct: 15.0
 

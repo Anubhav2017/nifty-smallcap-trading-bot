@@ -1,0 +1,12 @@
+{
+    "symbols_from": "config/dataset.nifty50.json",
+    "output_dir": "dataset_nifty50/screener_excel",
+    "cookies_file": "screener_cookies.txt",
+    "sleep_seconds": 4.0,
+    "rate_limit_max_retries": 6,
+    "rate_limit_base_seconds": 30,
+    "request_pause_seconds": 0.75,
+    "skip_existing": true,
+    "consolidated": true
+  }
+  

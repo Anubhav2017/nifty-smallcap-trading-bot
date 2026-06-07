@@ -13,7 +13,7 @@ from typing import Any, List, Optional
 
 from dataset_config import load_dataset_config, load_universe_symbols
 from download_config import load_symbols_from_csv
-from env_utils import load_env_file
+from env_utils import load_env_file, resolve_repo_path
 from screener_client import (
     ScreenerAuthError,
     ScreenerError,
@@ -45,28 +45,28 @@ def _load_json_config(path: Path) -> dict[str, Any]:
 
 
 def load_screener_config(path: Path) -> ScreenerDownloadConfig:
-    base = path.parent.resolve()
+    config_path = path.resolve()
     raw = _load_json_config(path)
 
     symbols: List[str] = []
     if raw.get("symbols_from"):
-        ds_path = (base / str(raw["symbols_from"])).resolve()
+        ds_path = resolve_repo_path(config_path, str(raw["symbols_from"]))
         ds_cfg = load_dataset_config(ds_path)
         symbols = load_universe_symbols(ds_cfg)
     elif raw.get("symbols_csv"):
         symbols = load_symbols_from_csv(
-            (base / str(raw["symbols_csv"])).resolve(),
+            resolve_repo_path(config_path, str(raw["symbols_csv"])),
             str(raw.get("symbol_column", "symbol")),
         )
     else:
         raise ValueError("Config must include 'symbols_from' or 'symbols_csv'.")
 
     cookies_file = raw.get("cookies_file")
-    cookies_path = (base / cookies_file).resolve() if cookies_file else None
+    cookies_path = resolve_repo_path(config_path, str(cookies_file)) if cookies_file else None
 
     return ScreenerDownloadConfig(
         symbols=symbols,
-        output_dir=(base / str(raw.get("output_dir", "screener_excel"))).resolve(),
+        output_dir=resolve_repo_path(config_path, str(raw.get("output_dir", "screener_excel"))),
         cookies_file=cookies_path,
         sleep_seconds=float(raw.get("sleep_seconds", 4.0)),
         skip_existing=bool(raw.get("skip_existing", True)),
@@ -196,7 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("config.screener.example.json"),
+        default=Path("config/screener.smallcap250.json"),
         help="Screener download config JSON",
     )
     parser.add_argument(

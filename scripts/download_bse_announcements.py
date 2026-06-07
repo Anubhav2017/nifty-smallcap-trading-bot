@@ -29,6 +29,7 @@ from bse_announcements import (
 from bse_category_filter import CategoryFilter, filters_match, parse_category_filter
 from dataset_config import load_dataset_config, load_universe_symbols
 from download_config import load_symbols_from_csv, resolve_date_range
+from env_utils import resolve_repo_path
 from tqdm import tqdm
 
 
@@ -64,13 +65,13 @@ def _load_json_config(path: Path) -> dict[str, Any]:
 
 
 def load_bse_config(path: Path) -> BseDownloadConfig:
-    base = path.parent.resolve()
+    config_path = path.resolve()
     raw = _load_json_config(path)
 
     symbols: List[str] = []
     date_raw: dict[str, Any] = dict(raw)
     if raw.get("symbols_from"):
-        ds_path = (base / str(raw["symbols_from"])).resolve()
+        ds_path = resolve_repo_path(config_path, str(raw["symbols_from"]))
         ds_cfg = load_dataset_config(ds_path)
         symbols = load_universe_symbols(ds_cfg)
         if "years_back" not in raw and "from_date" not in raw and "to_date" not in raw:
@@ -80,13 +81,13 @@ def load_bse_config(path: Path) -> BseDownloadConfig:
             }
     elif raw.get("symbols_csv"):
         symbols = load_symbols_from_csv(
-            (base / str(raw["symbols_csv"])).resolve(),
+            resolve_repo_path(config_path, str(raw["symbols_csv"])),
             str(raw.get("symbol_column", "symbol")),
         )
     else:
         raise ValueError("Config must include 'symbols_from' or 'symbols_csv'.")
 
-    output_dir = (base / str(raw.get("output_dir", "bse_announcements"))).resolve()
+    output_dir = resolve_repo_path(config_path, str(raw.get("output_dir", "bse_announcements")))
     from_date, to_date = resolve_date_range(
         date_raw,
         default_from="2021-01-01",
@@ -534,7 +535,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("config.bse.example.json"),
+        default=Path("config/bse.smallcap250.json"),
         help="BSE announcements download config JSON",
     )
     return parser.parse_args()

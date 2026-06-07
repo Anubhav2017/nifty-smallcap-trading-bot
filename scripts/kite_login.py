@@ -185,7 +185,7 @@ def main() -> None:
             if args.check_only:
                 return
             print("Skipping browser login. Use --force to log in again.")
-            print("You can run: python build_equity_dataset.py --config config.dataset.json")
+            print("You can run: python scripts/build_equity_dataset.py --config config/dataset.smallcap250.json")
             return
 
         if args.check_only:

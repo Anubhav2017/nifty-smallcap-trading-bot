@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from download_config import _parse_intervals, load_symbols_from_csv, resolve_date_range
+from env_utils import resolve_repo_path
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class DatasetBuildConfig:
     refresh_universe_from_nse: bool
     save_instruments: bool
     nse_constituents_url: Optional[str]
+    bse_config: Optional[Path]
+    screener_config: Optional[Path]
 
     @property
     def from_dt(self) -> datetime:
@@ -56,12 +59,12 @@ def load_dataset_config(path: Path) -> DatasetBuildConfig:
     if not path.is_file():
         raise FileNotFoundError(f"Config not found: {path}")
 
-    base = path.parent.resolve()
+    base = path.resolve()
     raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("Config root must be a JSON object.")
 
-    dataset_root = (base / str(raw.get("dataset_root", "dataset"))).resolve()
+    dataset_root = resolve_repo_path(base, str(raw.get("dataset_root", "dataset")))
     universe_name = str(raw.get("universe_name", "default")).strip() or "default"
     symbols_csv = raw.get("symbols_csv")
     if not symbols_csv:
@@ -88,10 +91,16 @@ def load_dataset_config(path: Path) -> DatasetBuildConfig:
     if nse_url is not None:
         nse_url = str(nse_url).strip() or None
 
+    def _optional_config_path(key: str) -> Optional[Path]:
+        val = raw.get(key)
+        if val is None or str(val).strip() == "":
+            return None
+        return resolve_repo_path(base, str(val))
+
     return DatasetBuildConfig(
         dataset_root=dataset_root,
         universe_name=universe_name,
-        symbols_csv=(base / symbols_csv).resolve(),
+        symbols_csv=resolve_repo_path(base, str(symbols_csv)),
         symbol_column=symbol_column,
         from_date=from_date,
         to_date=to_date,
@@ -102,6 +111,8 @@ def load_dataset_config(path: Path) -> DatasetBuildConfig:
         refresh_universe_from_nse=bool(raw.get("refresh_universe_from_nse", False)),
         save_instruments=bool(raw.get("save_instruments", True)),
         nse_constituents_url=nse_url,
+        bse_config=_optional_config_path("bse_config"),
+        screener_config=_optional_config_path("screener_config"),
     )
 
 
