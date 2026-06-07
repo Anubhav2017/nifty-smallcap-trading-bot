@@ -207,7 +207,6 @@ def build_price_chart(
     *,
     price_overlays: list[str] | None = None,
     panels: list[str] | None = None,
-    interval: str = "day",
 ) -> go.Figure:
     """Candlestick chart with optional MA/EMA overlays and indicator subplots."""
     if df.empty:
@@ -305,15 +304,14 @@ def build_price_chart(
         if spec.get("zeroline"):
             fig.add_hline(y=0, line_color="#666", line_width=1, row=row_idx, col=1)
 
-    title_suffix = "daily" if interval == "day" else "1-minute"
     height = 460 + 150 * len(panel_keys)
     fig.update_layout(
-        title=f"OHLCV ({title_suffix})",
+        title="OHLCV (daily)",
         height=height,
         legend=dict(orientation="h", yanchor="bottom", y=1.06, xanchor="right", x=1),
         template="plotly_dark",
     )
-    initial_days = 180 if interval == "day" else 5
+    initial_days = 180
     _apply_zoom_layout(fig, df, n_rows=n_rows, panel_keys=panel_keys, initial_days=initial_days)
     fig.update_xaxes(rangeslider_visible=False)
     return fig

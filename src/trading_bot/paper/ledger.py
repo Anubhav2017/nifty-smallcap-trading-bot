@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,15 +11,12 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.backtest.costs import CostModel
-from trading_bot.backtest.intraday_sim import load_session_bars, parse_entry_datetime, simulate_intraday_session
 from trading_bot.config import Config
-from trading_bot.data.bars import BarStore
 from trading_bot.models.classifier import EntryClassifier
 from trading_bot.models.exit_policy import ExitPolicy
 from trading_bot.models.ranker import StockRanker
 from trading_bot.models.training import load as load_model_bundle
 from trading_bot.risk.engine import RiskEngine
-from trading_bot.risk.hybrid_signals import generate_hybrid_signals
 from trading_bot.types import Horizon, Instrument, Position, Signal, TradeStatus
 
 logger = logging.getLogger(__name__)
@@ -43,6 +40,13 @@ LEDGER_COLUMNS = [
 _INITIAL_EQUITY = 1_000_000.0  # 10 lakh INR — default starting capital
 
 
+def _parse_entry_datetime(signal: Signal) -> datetime | None:
+    raw = signal.features.get("entry_datetime")
+    if not raw:
+        return None
+    return pd.to_datetime(raw).to_pydatetime()
+
+
 class PaperLedger:
     """Append-only paper trading ledger driven by LightGBM signals.
 
@@ -56,8 +60,6 @@ class PaperLedger:
         cfg: Config,
         model_dir: Path,
         ledger_path: Path,
-        *,
-        hybrid: bool = False,
     ) -> None:
         self.cfg = cfg
         self.model_dir = Path(model_dir)
@@ -65,15 +67,11 @@ class PaperLedger:
         self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.bundle = load_model_bundle(cfg, self.model_dir)
-        self.hybrid = hybrid or (
-            self.bundle.intraday_timing is not None and self.bundle.intraday_timing._fitted
-        )
 
         self.ranker = self.bundle.ranker
         self.classifiers = self.bundle.classifiers
         self.exit_policy = self.bundle.exit_policy
         self.risk_engine = RiskEngine(cfg)
-        self._bar_store = BarStore(cfg=self.cfg)
         self._cost_model = CostModel(cfg)
 
         self._ledger: pd.DataFrame = self.load_ledger()
@@ -96,9 +94,6 @@ class PaperLedger:
         """
         if as_of_date is None:
             as_of_date = date.today()
-
-        if self.hybrid:
-            return self._run_hybrid_session(as_of_date)
 
         logger.info("PaperLedger: running session for %s", as_of_date)
 
@@ -253,106 +248,6 @@ class PaperLedger:
         )
         return {"new_entries": new_entries, "exits_processed": exits_processed, "equity": equity}
 
-    def _run_hybrid_session(self, as_of_date: date) -> dict[str, Any]:
-        """Hybrid paper session: 5m timed entries and bar-level SL/TP/time exits."""
-        logger.info("PaperLedger: running hybrid session for %s", as_of_date)
-
-        try:
-            ohlcv_by_token, index_df, instruments = self._load_market_data(as_of_date)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load market data for %s: %s", as_of_date, exc)
-            return {"new_entries": 0, "exits_processed": 0, "equity": self._current_equity()}
-
-        if not ohlcv_by_token:
-            logger.warning("No market data available for %s.", as_of_date)
-            return {"new_entries": 0, "exits_processed": 0, "equity": self._current_equity()}
-
-        feature_df = self._build_features(ohlcv_by_token, index_df, instruments)
-        if feature_df.empty or not self.ranker._fitted:
-            return {"new_entries": 0, "exits_processed": 0, "equity": self._current_equity()}
-
-        token_map = {i.instrument_token: i for i in instruments}
-        open_positions = self._reconstruct_open_positions(token_map)
-        for pos in open_positions:
-            token = pos.signal.instrument.instrument_token
-            if token == 0 and pos.signal.instrument.symbol in {i.symbol for i in instruments}:
-                for inst in instruments:
-                    if inst.symbol == pos.signal.instrument.symbol:
-                        pos.signal.instrument = inst
-                        break
-
-        signals = generate_hybrid_signals(self.bundle, feature_df, as_of_date, self.risk_engine)
-        symbols: set[str] = set()
-        for pos in open_positions:
-            symbols.add(pos.signal.instrument.symbol.upper())
-        for sig in signals:
-            symbols.add(sig.instrument.symbol.upper())
-
-        bars_by_symbol = load_session_bars(self._bar_store, symbols, as_of_date)
-        trading_dates = sorted(
-            {
-                d
-                for df in ohlcv_by_token.values()
-                for d in df["date"].unique().tolist()
-            }
-        )
-
-        pre_equity = self._current_equity()
-        open_before = {
-            (p.signal.instrument.symbol, p.signal.horizon.value, p.entry_date)
-            for p in open_positions
-        }
-        session_closed: list[Position] = []
-
-        still_open, session_closed, _post_equity = simulate_intraday_session(
-            as_of_date,
-            open_positions,
-            session_closed,
-            signals,
-            bars_by_symbol,
-            all_trading_dates=trading_dates,
-            equity=pre_equity,
-            risk_engine=self.risk_engine,
-            cost_model=self._cost_model,
-            daily_ohlcv_by_token=ohlcv_by_token,
-        )
-
-        new_rows: list[dict] = []
-        running_equity = pre_equity
-        exits_processed = 0
-        for pos in session_closed:
-            if pos.exit_date != as_of_date:
-                continue
-            running_equity += pos.net_pnl or 0.0
-            new_rows.append(self._exit_row(pos, as_of_date, running_equity))
-            exits_processed += 1
-
-        new_entries = 0
-        for pos in still_open:
-            key = (pos.signal.instrument.symbol, pos.signal.horizon.value, pos.entry_date)
-            if key in open_before or pos.entry_date != as_of_date:
-                continue
-            entry_cost = self._compute_cost(pos.entry_price, pos.shares)
-            running_equity -= pos.entry_price * pos.shares
-            new_rows.append(self._entry_row(pos, as_of_date, running_equity, entry_cost))
-            new_entries += 1
-
-        equity = running_equity
-
-        if new_rows:
-            new_df = pd.DataFrame(new_rows, columns=LEDGER_COLUMNS)
-            self._ledger = pd.concat([self._ledger, new_df], ignore_index=True)
-            self.save_ledger(self._ledger)
-
-        logger.info(
-            "Hybrid session %s complete: entries=%d exits=%d equity=%.2f",
-            as_of_date,
-            new_entries,
-            exits_processed,
-            equity,
-        )
-        return {"new_entries": new_entries, "exits_processed": exits_processed, "equity": equity}
-
     def _entry_row(
         self,
         pos: Position,
@@ -360,7 +255,7 @@ class PaperLedger:
         equity: float,
         entry_cost: float,
     ) -> dict:
-        entry_dt = pos.entry_datetime or parse_entry_datetime(pos.signal)
+        entry_dt = pos.entry_datetime or _parse_entry_datetime(pos.signal)
         return {
             "date": as_of_date,
             "symbol": pos.signal.instrument.symbol,

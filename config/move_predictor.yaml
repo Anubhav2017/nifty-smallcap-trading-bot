@@ -1,0 +1,106 @@
+# Volume-momentum move predictor v2
+data:
+  dataset_root: dataset_smallcap250
+
+universe:
+  liquidity_filter_adtv_cr: 2.0
+  liquidity_lookback_days: 20
+
+move_predictor:
+  train_start: "2024-01-01"
+  train_end: "2024-12-31"
+  backtest_start: "2025-01-01"
+  backtest_end: "2026-06-05"          # extended to latest available data (liquidity filter uses as_of_date)
+  top_n: 5                          # quality over quantity — top 5 model picks per day
+  min_volume_ratio: 1.5          # lagged volume vs 20d avg (universe playbook)
+  label_min_move_pct: 1.5        # train label: next-day return >= this
+  min_model_score: 0.0            # rank-only; big-move probs sit ~20-30%
+  require_positive_ev: false     # score is P(1d big up); exits are swing
+  walk_forward_quarters: true    # retrain at each 2025 quarter boundary
+  horizon: swing
+
+horizons:
+  swing:
+    min_hold_days: 2
+    max_hold_days: 10
+    label_day: 5
+  positional:
+    min_hold_days: 10
+    max_hold_days: 60
+    label_day: 20
+
+exit:
+  swing:
+    atr_sl_multiple: 1.75
+    max_sl_pct: 0.05             # hard cap: stop never wider than 5% below entry
+    reward_risk_ratio: 2.0
+    atr_period: 14
+  positional:
+    atr_sl_multiple: 3.0
+    max_sl_pct: 0.10             # 10% cap for positional (longer hold)
+    reward_risk_ratio: 2.5
+    atr_period: 14
+
+risk:
+  risk_per_trade_pct: 0.75
+  max_daily_entries: 5            # reverted — quality over quantity, regime filter handles bad days
+  max_gross_exposure_pct: 80.0
+  max_position_pct: 15.0
+
+costs:
+  brokerage_pct: 0.03
+  stt_delivery_pct: 0.1
+  stamp_duty_pct: 0.015
+  exchange_txn_charge_pct: 0.00345
+  sebi_turnover_fee_pct: 0.0001
+  gst_on_charges_pct: 18.0
+  slippage_min_pct: 0.05
+  slippage_spread_factor: 0.1
+
+entry:
+  top_n_candidates: 5
+  min_win_prob: 0.45
+  min_expected_value: 0.0
+
+regime_filter:
+  enabled: true
+  min_breadth_pct: 0.40          # ≥40% of stocks must be above their 20D SMA (breadth-only, no index filter)
+  index_sma_period: 50           # ignored when index CSV absent or when breadth-only mode preferred
+  use_index: false               # set true to enable macro index filter on top of breadth
+
+circuit_breaker:
+  enabled: false                 # too aggressive: fires in Q1 losses and blocks Q2 momentum recovery
+  window_days: 5                 # rolling calendar-day window to count SL hits
+  sl_trigger_count: 3            # tighter: 3 SL hits in 5 days → pause (was 4 in 7)
+  pause_days: 5                  # trading pause calendar days after trigger
+
+fundamental_screener:
+  enabled: true
+  min_roce: 0.15                 # 15% ROCE (TTM operating profit / capital employed)
+  max_debt_equity: 1.0           # borrowings / (equity + reserves)
+  min_profit_growth_yoy: 0.0     # latest annual net profit vs prior year (≥ 0 = positive growth)
+  min_profit_growth_qtr: 0.0     # same quarter YoY net profit growth (≥ 0 = positive)
+  max_pe: 30.0                   # market cap / latest annual (or TTM) net profit
+  dma_period: 50                 # short-term trend: price must be above this DMA
+  require_price_above_dma: true
+  trend_dma_period: 200          # long-term trend filter: price must be above 200 DMA
+  require_price_above_trend_dma: true
+  skip_missing: true             # allow stocks with partial fundamental data (use TTM fallbacks)
+
+entry_filters:
+  # ── Post-analysis rule-based guards (no additional data required) ─────────
+  max_20d_return: 0.15           # skip if stock rallied >15% in past 20 days (over-extension)
+  max_ext_from_200sma: 0.30      # skip if price is >30% above 200-day SMA (exhaustion zone)
+  sl_cooldown_days: 7            # after a stop-loss exit, skip that symbol for N days (was 5)
+  sl_cooldown_multiplier: 1.0    # flat cooldown (no escalation — universe too small for 2× compounding)
+  max_sl_hits: 2                 # block symbol for rest of fold after 2 SL hits (SHYAMMETL/KIMS pattern)
+
+breakout_signal:
+  enabled: true
+  top_n: 1                       # was 3 — cut to 1 (best signal only); breakout was -₹38K net at top_n=3
+  min_volume_ratio: 3.0          # raised from 2× → 3× (stronger volume confirmation required)
+  min_52w_high_ratio: 0.97       # relaxed back from 0.99 → only vol/breadth are the quality gates
+  max_20d_return: 0.20           # cap at 20% (wider than momentum signal — trend starts extend)
+  require_above_200dma: true     # long-term trend must be up
+  reward_risk_ratio: 2.5         # wider TP for breakout signals (let trend runners go)
+  min_breadth_pct: 0.55          # breakout needs stronger market than momentum (55% vs 40% breadth)

@@ -54,7 +54,7 @@ def instruments_for_range(
 def load_ohlcv(start: date, end: date, cfg: Config | None = None) -> dict[int, pd.DataFrame]:
     """Load daily OHLCV for all universe instruments in [start, end].
 
-    Reads ``{dataset_root}/ohlcv/day/{SYMBOL}.csv`` or resamples minute bars.
+    Reads ``{dataset_root}/ohlcv/day/{SYMBOL}.csv``.
     """
     cfg = cfg or Config(None)
     root = dataset_root_from_config(cfg)

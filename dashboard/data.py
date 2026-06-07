@@ -74,7 +74,6 @@ def dataset_summary(root: Path) -> dict:
     return {
         "root": str(root),
         "day_symbols": len(list_symbols("day", root=root)),
-        "minute_symbols": len(list_symbols("minute", root=root)),
         "screener_symbols": len(list_screener_symbols(root / "screener_excel")),
         "date_range": manifest.get("date_range", {}),
     }

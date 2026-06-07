@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 
 SCREENER_SUFFIX = "_consolidated.xlsx"
+SCREENER_SUFFIX_STANDALONE = "_standalone.xlsx"
 DATA_SHEET = "Data Sheet"
 
 _SECTIONS = (
@@ -37,6 +38,8 @@ _KEY_METRICS = {
     "Cash from Operating Activity",
     "Profit before tax",
     "Expenses",
+    "Interest",
+    "Depreciation",
 }
 
 
@@ -157,7 +160,7 @@ def _derived_ratios(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_symbol_fundamentals(screener_dir: Path, symbol: str) -> pd.DataFrame:
-    path = screener_dir / f"{symbol.upper()}{SCREENER_SUFFIX}"
+    path = screener_file(screener_dir, symbol)
     if not path.is_file():
         return pd.DataFrame()
     long_df = parse_screener_excel(path)
@@ -168,14 +171,26 @@ def load_symbol_fundamentals(screener_dir: Path, symbol: str) -> pd.DataFrame:
 
 
 def list_screener_symbols(screener_dir: Path) -> list[str]:
-    return sorted(
-        p.name[: -len(SCREENER_SUFFIX)].upper()
-        for p in screener_dir.glob(f"*{SCREENER_SUFFIX}")
-    )
+    found: set[str] = set()
+    for p in screener_dir.glob(f"*{SCREENER_SUFFIX}"):
+        found.add(p.name[: -len(SCREENER_SUFFIX)].upper())
+    for p in screener_dir.glob(f"*{SCREENER_SUFFIX_STANDALONE}"):
+        found.add(p.name[: -len(SCREENER_SUFFIX_STANDALONE)].upper())
+    return sorted(found)
 
 
 def screener_file(screener_dir: Path, symbol: str) -> Path:
-    return screener_dir / f"{symbol.upper()}{SCREENER_SUFFIX}"
+    """Return the path to the screener Excel file for *symbol*.
+
+    Prefers ``_consolidated.xlsx``; falls back to ``_standalone.xlsx``.
+    """
+    consolidated = screener_dir / f"{symbol.upper()}{SCREENER_SUFFIX}"
+    if consolidated.is_file():
+        return consolidated
+    standalone = screener_dir / f"{symbol.upper()}{SCREENER_SUFFIX_STANDALONE}"
+    if standalone.is_file():
+        return standalone
+    return consolidated  # caller checks .is_file()
 
 
 def _section_table(block: pd.DataFrame, date_row_idx: int, dates: List[pd.Timestamp]) -> pd.DataFrame:
@@ -259,3 +274,265 @@ def load_all_fundamentals(
     if symbols is None:
         symbols = list_screener_symbols(screener_dir)
     return {sym: load_symbol_fundamentals(screener_dir, sym) for sym in symbols}
+
+
+_META_COLUMNS = {
+    "COMPANY NAME": "company_name",
+    "Current Price": "current_price",
+    "Market Capitalization": "market_cap",
+    "Face Value": "face_value",
+    "Number of shares": "shares",
+}
+
+
+def load_symbol_meta(screener_dir: Path, symbol: str) -> dict[str, str]:
+    path = screener_file(screener_dir, symbol)
+    meta = load_meta(path)
+    row = {"symbol": symbol.upper()}
+    for src, dst in _META_COLUMNS.items():
+        row[dst] = meta.get(src, "")
+    return row
+
+
+def consolidate_screener_directory(
+    screener_dir: Path,
+    symbols: Optional[Iterable[str]] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Parse every ``*{SCREENER_SUFFIX}`` file under *screener_dir*.
+
+    Returns ``(meta, fundamentals_wide, fundamentals_long, errors)`` where
+    *errors* lists ``SYMBOL: reason`` for files that failed to parse.
+    """
+    screener_dir = Path(screener_dir)
+    if symbols is None:
+        paths = sorted(screener_dir.glob(f"*{SCREENER_SUFFIX}"))
+    else:
+        paths = [screener_file(screener_dir, sym) for sym in symbols]
+
+    meta_rows: list[dict] = []
+    wide_parts: list[pd.DataFrame] = []
+    long_parts: list[pd.DataFrame] = []
+    errors: list[str] = []
+
+    for path in paths:
+        if not path.is_file():
+            errors.append(f"{path.stem}: file not found")
+            continue
+        symbol = path.name[: -len(SCREENER_SUFFIX)].upper()
+        try:
+            meta_rows.append(load_symbol_meta(screener_dir, symbol))
+            long_df = parse_screener_excel(path)
+            if not long_df.empty:
+                tagged = long_df.copy()
+                tagged.insert(0, "symbol", symbol)
+                long_parts.append(tagged)
+            wide = load_symbol_fundamentals(screener_dir, symbol)
+            if not wide.empty:
+                tagged_wide = wide.copy()
+                tagged_wide.insert(0, "symbol", symbol)
+                wide_parts.append(tagged_wide)
+        except Exception as exc:  # noqa: BLE001 — collect per-symbol failures
+            errors.append(f"{symbol}: {exc}")
+
+    meta = pd.DataFrame(meta_rows) if meta_rows else pd.DataFrame(columns=["symbol"])
+    fundamentals_wide = (
+        pd.concat(wide_parts, ignore_index=True) if wide_parts else pd.DataFrame()
+    )
+    fundamentals_long = (
+        pd.concat(long_parts, ignore_index=True) if long_parts else pd.DataFrame()
+    )
+
+    if not fundamentals_wide.empty:
+        fundamentals_wide["report_date"] = pd.to_datetime(
+            fundamentals_wide["report_date"]
+        ).dt.normalize()
+        fundamentals_wide = fundamentals_wide.sort_values(
+            ["symbol", "period_type", "report_date"]
+        ).reset_index(drop=True)
+    if not fundamentals_long.empty:
+        fundamentals_long["report_date"] = pd.to_datetime(
+            fundamentals_long["report_date"]
+        ).dt.normalize()
+        fundamentals_long = fundamentals_long.sort_values(
+            ["symbol", "period_type", "report_date", "metric"]
+        ).reset_index(drop=True)
+    if not meta.empty:
+        meta = meta.sort_values("symbol").reset_index(drop=True)
+
+    return meta, fundamentals_wide, fundamentals_long, errors
+
+
+def write_consolidated_screener(
+    output: Path,
+    meta: pd.DataFrame,
+    fundamentals_wide: pd.DataFrame,
+    fundamentals_long: pd.DataFrame,
+    *,
+    fmt: str = "xlsx",
+) -> None:
+    """Write consolidated tables to a single file (xlsx) or parquet/csv bundle."""
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fmt = fmt.lower()
+
+    if fmt == "xlsx":
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            meta.to_excel(writer, sheet_name="meta", index=False)
+            fundamentals_wide.to_excel(writer, sheet_name="fundamentals", index=False)
+            fundamentals_long.to_excel(writer, sheet_name="fundamentals_long", index=False)
+        return
+
+    if fmt == "parquet":
+        # Single parquet file: wide fundamentals (primary analysis table).
+        # Meta and long form as sibling files with shared stem.
+        fundamentals_wide.to_parquet(output, index=False)
+        if not meta.empty:
+            meta.to_parquet(output.with_name(output.stem + "_meta.parquet"), index=False)
+        if not fundamentals_long.empty:
+            fundamentals_long.to_parquet(
+                output.with_name(output.stem + "_long.parquet"), index=False
+            )
+        return
+
+    if fmt == "csv":
+        fundamentals_wide.to_csv(output, index=False)
+        if not meta.empty:
+            meta.to_csv(output.with_name(output.stem + "_meta.csv"), index=False)
+        if not fundamentals_long.empty:
+            fundamentals_long.to_csv(
+                output.with_name(output.stem + "_long.csv"), index=False
+            )
+        return
+
+    raise ValueError(f"Unsupported format: {fmt!r} (use xlsx, parquet, or csv)")
+
+
+def load_balance_sheet_extended(path: Path) -> pd.DataFrame:
+    """
+    Extended annual balance-sheet history from the Data Sheet block.
+
+    Returns columns: report_date, total_liabilities, total_assets, other_liabilities,
+    bonus_shares, shares (when present).
+    """
+    if not path.is_file():
+        return pd.DataFrame(
+            columns=[
+                "report_date",
+                "total_liabilities",
+                "total_assets",
+                "other_liabilities",
+                "bonus_shares",
+                "shares",
+            ]
+        )
+
+    raw = pd.read_excel(path, sheet_name=DATA_SHEET, header=None)
+    sections = find_sections(raw)
+    bs_start = next((i for i, pt in sections if pt == "annual_bs"), None)
+    if bs_start is None:
+        return pd.DataFrame(
+            columns=[
+                "report_date",
+                "total_liabilities",
+                "total_assets",
+                "other_liabilities",
+                "bonus_shares",
+                "shares",
+            ]
+        )
+
+    bs_end = next((i for i, pt in sections if i > bs_start), len(raw))
+    block = raw.iloc[bs_start:bs_end]
+
+    date_row_idx = None
+    for j in range(len(block)):
+        label = block.iloc[j, 0]
+        if isinstance(label, str) and label.strip() == "Report Date":
+            date_row_idx = j
+            break
+    if date_row_idx is None:
+        return pd.DataFrame(
+            columns=[
+                "report_date",
+                "total_liabilities",
+                "total_assets",
+                "other_liabilities",
+                "bonus_shares",
+                "shares",
+            ]
+        )
+
+    dates = parse_dates(block.iloc[date_row_idx])
+    if not dates:
+        return pd.DataFrame(
+            columns=[
+                "report_date",
+                "total_liabilities",
+                "total_assets",
+                "other_liabilities",
+                "bonus_shares",
+                "shares",
+            ]
+        )
+
+    metric_rows: dict[str, list[float | None]] = {
+        "other_liabilities": [None] * len(dates),
+        "total_liabilities": [None] * len(dates),
+        "total_assets": [None] * len(dates),
+        "bonus_shares": [None] * len(dates),
+        "shares": [None] * len(dates),
+    }
+    total_seen = 0
+
+    for j in range(date_row_idx + 1, len(block)):
+        metric = block.iloc[j, 0]
+        if not isinstance(metric, str) or not metric.strip():
+            continue
+        name = metric.strip()
+        values = block.iloc[j, 1 : 1 + len(dates)]
+        nums: list[float | None] = []
+        for val in values:
+            if pd.isna(val):
+                nums.append(None)
+                continue
+            try:
+                nums.append(float(val))
+            except (TypeError, ValueError):
+                nums.append(None)
+
+        if name == "Other Liabilities":
+            metric_rows["other_liabilities"] = nums
+        elif name == "Total":
+            total_seen += 1
+            key = "total_liabilities" if total_seen == 1 else "total_assets"
+            metric_rows[key] = nums
+        elif name == "New Bonus Shares":
+            metric_rows["bonus_shares"] = nums
+        elif name == "No. of Equity Shares":
+            metric_rows["shares"] = nums
+
+    rows: list[dict] = []
+    for i, dt in enumerate(dates):
+        rows.append(
+            {
+                "report_date": dt,
+                "total_liabilities": metric_rows["total_liabilities"][i],
+                "total_assets": metric_rows["total_assets"][i],
+                "other_liabilities": metric_rows["other_liabilities"][i],
+                "bonus_shares": metric_rows["bonus_shares"][i],
+                "shares": metric_rows["shares"][i],
+            }
+        )
+    return pd.DataFrame(rows).sort_values("report_date").reset_index(drop=True)
+
+
+def load_bonus_shares_history(path: Path) -> pd.DataFrame:
+    """Bonus share issuances from extended balance sheet parse."""
+    ext = load_balance_sheet_extended(path)
+    if ext.empty:
+        return pd.DataFrame(columns=["report_date", "bonus_shares"])
+    sub = ext[ext["bonus_shares"].notna() & (ext["bonus_shares"] > 0)][
+        ["report_date", "bonus_shares"]
+    ]
+    return sub.reset_index(drop=True)

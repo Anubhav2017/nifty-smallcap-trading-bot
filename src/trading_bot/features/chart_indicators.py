@@ -32,6 +32,10 @@ def add_chart_indicators(df: pd.DataFrame) -> pd.DataFrame:
         out[f"sma_{window}"] = sma
         out[f"close_sma_{window}d"] = close / sma.replace(0, np.nan) - 1.0
 
+    sma_200 = close.rolling(200).mean()
+    out["sma_200"] = sma_200
+    out["close_sma_200d"] = close / sma_200.replace(0, np.nan) - 1.0
+
     out["ema_12"] = close.ewm(span=12, adjust=False).mean()
     out["ema_26"] = close.ewm(span=26, adjust=False).mean()
     out["high_low_range"] = (out["high"] - out["low"]) / close.replace(0, np.nan)

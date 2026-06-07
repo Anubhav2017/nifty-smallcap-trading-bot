@@ -1,0 +1,5 @@
+symbol,ex_date,action,ratio,notes
+# action: bonus or split
+# ratio: new_shares / old_shares (1:1 bonus = 2.0, 2:1 split = 2.0)
+# Example:
+# AARTIIND,2020-03-31,bonus,2.0,1:1 bonus issue

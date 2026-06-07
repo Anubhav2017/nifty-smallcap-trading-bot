@@ -25,7 +25,7 @@ def write_test_dataset(
         "version": 1,
         "universe": {"name": "test", "symbol_count": 1, "enriched_csv": "universe/universe_enriched.csv"},
         "date_range": {"from": "2024-01-01", "to": "2026-01-01"},
-        "intervals": ["day", "minute"],
+        "intervals": ["day"],
         "instruments": {"latest": "instruments/nse_eq_latest.csv"},
     }
     (root / "manifest.json").write_text(json.dumps(manifest))
@@ -68,20 +68,3 @@ def write_test_dataset(
     )
     (root / "ohlcv" / "day").mkdir(parents=True, exist_ok=True)
     daily.to_csv(root / "ohlcv" / "day" / f"{symbol}.csv", index=False)
-
-    minute_rows = []
-    for minute in range(15, 61):
-        hour = 9 + minute // 60
-        mins = minute % 60
-        minute_rows.append(
-            {
-                "date": f"{day.isoformat()} {hour:02d}:{mins:02d}:00+05:30",
-                "open": 100.0 + minute * 0.01,
-                "high": 101.0 + minute * 0.01,
-                "low": 99.5 + minute * 0.01,
-                "close": 100.5 + minute * 0.01,
-                "volume": 1000.0 + minute,
-            }
-        )
-    (root / "ohlcv" / "minute").mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(minute_rows).to_csv(root / "ohlcv" / "minute" / f"{symbol}.csv", index=False)

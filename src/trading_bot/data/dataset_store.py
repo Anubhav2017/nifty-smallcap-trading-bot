@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
@@ -43,7 +42,9 @@ def load_manifest(root: Optional[Path] = None) -> dict:
 
 
 def list_symbols(interval: str, root: Optional[Path] = None) -> List[str]:
-    folder = dataset_root(root) / "ohlcv" / interval
+    if interval != "day":
+        raise ValueError(f"Only daily OHLCV is supported (got {interval!r}).")
+    folder = dataset_root(root) / "ohlcv" / "day"
     if not folder.is_dir():
         return []
     return sorted(p.stem for p in folder.glob("*.csv"))
@@ -76,7 +77,9 @@ def load_ohlcv(
     interval: str,
     root: Optional[Path] = None,
 ) -> pd.DataFrame:
-    path = dataset_root(root) / "ohlcv" / interval / f"{symbol.upper()}.csv"
+    if interval != "day":
+        raise ValueError(f"Only daily OHLCV is supported (got {interval!r}).")
+    path = dataset_root(root) / "ohlcv" / "day" / f"{symbol.upper()}.csv"
     if not path.is_file():
         raise FileNotFoundError(path)
     df = pd.read_csv(path)
@@ -91,89 +94,22 @@ def _normalize_daily(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("date").reset_index(drop=True)
 
 
-def _resample_minute_to_daily(df: pd.DataFrame) -> pd.DataFrame:
-    ts = pd.to_datetime(df["date"])
-    daily = (
-        df.assign(_date=ts.dt.date)
-        .groupby("_date", as_index=False)
-        .agg(
-            open=("open", "first"),
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("close", "last"),
-            volume=("volume", "sum"),
-        )
-        .rename(columns={"_date": "date"})
-    )
-    return daily[_DAILY_COLS]
-
-
 def load_daily_bars(
     symbol: str,
     start: date,
     end: date,
     root: Optional[Path] = None,
 ) -> pd.DataFrame:
-    """Daily OHLCV for *symbol* in [start, end]; uses day CSV or resamples minute."""
+    """Daily OHLCV for *symbol* in [start, end] from ``ohlcv/day/{SYMBOL}.csv``."""
     root = dataset_root(root)
     sym = symbol.upper()
     day_path = root / "ohlcv" / "day" / f"{sym}.csv"
     try:
-        if day_path.is_file():
-            df = _normalize_daily(load_ohlcv(sym, "day", root))
-        else:
-            minute = load_ohlcv(sym, "minute", root)
-            df = _resample_minute_to_daily(minute)
+        if not day_path.is_file():
+            raise FileNotFoundError(day_path)
+        df = _normalize_daily(load_ohlcv(sym, "day", root))
     except FileNotFoundError:
         return pd.DataFrame(columns=_DAILY_COLS)
 
     mask = (df["date"] >= start) & (df["date"] <= end)
     return df.loc[mask].reset_index(drop=True)
-
-
-@lru_cache(maxsize=256)
-def _load_minute_csv(symbol: str, root_str: str) -> pd.DataFrame:
-    df = load_ohlcv(symbol, "minute", Path(root_str))
-    df = df.copy()
-    df["datetime"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-    return df.sort_values("datetime").reset_index(drop=True)
-
-
-def load_minute_session(
-    symbol: str,
-    session: date,
-    root: Optional[Path] = None,
-    *,
-    resample_5m: bool = True,
-) -> pd.DataFrame:
-    """Intraday bars for one symbol on one session (resampled to 5m by default)."""
-    root = dataset_root(root)
-    try:
-        df = _load_minute_csv(symbol.upper(), str(root))
-    except FileNotFoundError:
-        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
-
-    day_mask = df["datetime"].dt.date == session
-    session_df = df.loc[day_mask].copy()
-    if session_df.empty:
-        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
-
-    if not resample_5m:
-        return session_df.reset_index(drop=True)
-
-    indexed = session_df.set_index("datetime")
-    bars = (
-        indexed.resample("5min")
-        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
-        .dropna(subset=["open"])
-        .reset_index()
-    )
-    return bars
-
-
-def minute_session_dates(symbol: str, root: Optional[Path] = None) -> list[date]:
-    try:
-        df = _load_minute_csv(symbol.upper(), str(dataset_root(root)))
-    except FileNotFoundError:
-        return []
-    return sorted(set(df["datetime"].dt.date))

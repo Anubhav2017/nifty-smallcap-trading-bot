@@ -1,14 +1,29 @@
+# Python
 .venv/
 .pkgs/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.ruff_cache/
 *.egg-info/
 dist/
 build/
+
+# Tools
+.pytest_cache/
+.ruff_cache/
+
+# Data (large; managed outside repo)
 dataset_smallcap250/*
 dataset_nifty50/*
+
+# Generated reports
+reports/
+
+# Trained models
 models/
-*.log
+
+# Credentials
 .env
+screener_cookies.txt
+
+# Logs
+*.log

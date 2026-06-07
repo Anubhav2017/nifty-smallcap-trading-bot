@@ -13,7 +13,6 @@ import pandas as pd
 
 from trading_bot.backtest.costs import CostModel
 from trading_bot.backtest.engine import BacktestEngine
-from trading_bot.backtest.hybrid_engine import HybridBacktestEngine
 from trading_bot.backtest.metrics import (
     calmar_ratio,
     compute_objective_j,
@@ -157,7 +156,6 @@ class WalkForwardRunner:
         report_dir: Path,
         *,
         model_dir: Path | None = None,
-        hybrid: bool = False,
         update_each_fold: bool = False,
     ) -> dict:
         """Orchestrate the full walk-forward.
@@ -168,7 +166,6 @@ class WalkForwardRunner:
             report_dir:  Directory where per-fold CSVs will be written.
             model_dir:   Load this bundle for fold 0 (and keep fixed, or as warm
                          start when ``update_each_fold`` is True).
-            hybrid:      Use hybrid signal generation and 5m backtest engine.
             update_each_fold: After each fold's OOS validation, retrain on the
                          next fold's train window. Requires ``model_dir``.
 
@@ -196,25 +193,13 @@ class WalkForwardRunner:
             current_bundle = load_model_bundle(self._cfg, Path(model_dir))
             if not current_bundle.ranker._fitted:
                 raise RuntimeError(f"No fitted ranker found in {model_dir}")
-            if hybrid and (
-                current_bundle.intraday_timing is None
-                or not current_bundle.intraday_timing._fitted
-            ):
-                raise RuntimeError(
-                    f"No intraday_timing.lgb in {model_dir}. Re-train with --hybrid."
-                )
             if update_each_fold:
                 logger.info(
-                    "Walk-forward warm-start from %s; retrain after each fold (hybrid=%s)",
+                    "Walk-forward warm-start from %s; retrain after each fold",
                     model_dir,
-                    hybrid,
                 )
             else:
-                logger.info(
-                    "Walk-forward using fixed model from %s (hybrid=%s)",
-                    model_dir,
-                    hybrid,
-                )
+                logger.info("Walk-forward using fixed model from %s", model_dir)
 
         # ── Optional module imports ───────────────────────────────────────────
         _data_mod = _try_import("trading_bot.data")
@@ -291,7 +276,6 @@ class WalkForwardRunner:
                     alpha=alpha,
                     beta=beta,
                     fixed_bundle=bundle_for_fold,
-                    hybrid=hybrid,
                 )
             except Exception as exc:
                 logger.error("Fold %d failed unexpectedly: %s", fold_id, exc, exc_info=True)
@@ -333,7 +317,6 @@ class WalkForwardRunner:
                     "beats_baseline": fold_metrics.beats_baseline,
                     "initial_model": str(model_dir) if model_dir else "",
                     "model_source": model_source,
-                    "hybrid": hybrid,
                     "update_each_fold": update_each_fold,
                 }
             )
@@ -350,7 +333,6 @@ class WalkForwardRunner:
                     current_bundle = self._retrain_bundle(
                         next_train_dates,
                         data_mod=_data_mod,
-                        hybrid=hybrid,
                     )
                 except Exception as exc:
                     logger.error(
@@ -383,7 +365,6 @@ class WalkForwardRunner:
             "mean_oos_j": mean_oos_j,
             "initial_model": str(model_dir) if model_dir else None,
             "update_each_fold": update_each_fold,
-            "hybrid": hybrid,
             "updated_model_dir": str(report_dir / "updated_model")
             if update_each_fold and current_bundle is not None
             else None,
@@ -466,12 +447,10 @@ class WalkForwardRunner:
         train_dates: list[date],
         *,
         data_mod: object,
-        hybrid: bool,
     ):
-        """Retrain ranker/classifiers (and optional timing model) on *train_dates*."""
+        """Retrain ranker/classifiers on *train_dates*."""
         from trading_bot.features.build import build
         from trading_bot.models.training import train as train_models
-        from trading_bot.models.training import train_intraday_timing
 
         fetch_start = train_dates[0] - timedelta(days=_FEATURE_LOOKBACK_DAYS)
         ohlcv_end = self._ohlcv_end_for_labels(self._cfg, train_dates[-1])
@@ -486,15 +465,9 @@ class WalkForwardRunner:
             raise RuntimeError("Empty feature matrix for retrain window.")
 
         bundle = train_models(self._cfg, feature_data, train_dates)
-        if hybrid:
-            timing, _rows = train_intraday_timing(self._cfg, feature_data, train_dates)
-            bundle.intraday_timing = timing
-            logger.info("  retrain: intraday timing rows=%d", _rows)
 
         fitted = ["ranker"] if bundle.ranker._fitted else []
         fitted.extend(h.value for h, c in bundle.classifiers.items() if c._fitted)
-        if bundle.intraday_timing is not None and bundle.intraday_timing._fitted:
-            fitted.append("intraday_timing")
         logger.info(
             "  retrain complete: rows=%d symbols=%d models=%s",
             len(feature_data),
@@ -518,7 +491,6 @@ class WalkForwardRunner:
         beta: float,
         *,
         fixed_bundle: object | None = None,
-        hybrid: bool = False,
     ) -> FoldMetrics | None:
         """Execute one walk-forward fold.  Returns None when data is missing."""
         fetch_start = train_dates[0] - timedelta(days=_FEATURE_LOOKBACK_DAYS)
@@ -549,12 +521,7 @@ class WalkForwardRunner:
                     risk_engine_inst = risk_engine_cls(self._cfg)
 
                     if fixed_bundle is not None:
-                        if hybrid:
-                            from trading_bot.risk.hybrid_signals import generate_hybrid_signals
-
-                            signal_fn = generate_hybrid_signals
-                        else:
-                            signal_fn = getattr(risk_mod, "generate_signals", None)
+                        signal_fn = getattr(risk_mod, "generate_signals", None)
 
                         if signal_fn:
                             for d in val_dates:
@@ -593,8 +560,7 @@ class WalkForwardRunner:
             return None
 
         cost_model = CostModel(self._cfg)
-        engine_cls = HybridBacktestEngine if hybrid else BacktestEngine
-        engine = engine_cls(self._cfg, cost_model, risk_engine_inst)  # type: ignore[arg-type]
+        engine = BacktestEngine(self._cfg, cost_model, risk_engine_inst)
 
         try:
             closed_positions, equity_curve = engine.run(

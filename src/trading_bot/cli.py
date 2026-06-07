@@ -37,11 +37,6 @@ def main(ctx: click.Context, config: Optional[Path]) -> None:
     help="Use a saved model for all folds instead of retraining each fold",
 )
 @click.option(
-    "--hybrid",
-    is_flag=True,
-    help="Hybrid 5m entries/exits (requires --model-dir with intraday_timing.lgb)",
-)
-@click.option(
     "--update-each-fold",
     is_flag=True,
     help="Load --model-dir for fold 0, then retrain before each subsequent fold",
@@ -53,7 +48,6 @@ def backtest(
     end: str,
     output_dir: Path,
     model_dir: Path | None,
-    hybrid: bool,
     update_each_fold: bool,
 ) -> None:
     """Run walk-forward backtest and export OOS fold reports."""
@@ -65,8 +59,6 @@ def backtest(
     cfg = Config(ctx.obj["config_path"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if hybrid and not model_dir:
-        raise click.ClickException("--hybrid requires --model-dir with a hybrid-trained bundle.")
     if update_each_fold and not model_dir:
         raise click.ClickException("--update-each-fold requires --model-dir.")
 
@@ -77,10 +69,7 @@ def backtest(
     else:
         mode = "retrain each fold"
 
-    console.print(
-        f"[bold green]Starting walk-forward backtest[/] {start} → {end} [{mode}]"
-        + (" [hybrid]" if hybrid else "")
-    )
+    console.print(f"[bold green]Starting walk-forward backtest[/] {start} → {end} [{mode}]")
     if model_dir:
         console.print(f"[dim]Initial model:[/] {model_dir}")
     runner = WalkForwardRunner(cfg)
@@ -89,7 +78,6 @@ def backtest(
         end_date=end,
         report_dir=output_dir,
         model_dir=model_dir,
-        hybrid=hybrid,
         update_each_fold=update_each_fold,
     )
     console.print(f"[bold]Folds completed:[/] {summary['folds_completed']}")
@@ -108,22 +96,17 @@ def backtest(
     default=None,
     help="Run name; saves to models/{name}/ with run_manifest.json",
 )
-@click.option(
-    "--hybrid",
-    is_flag=True,
-    help="Also train 5m entry-timing model (requires ohlcv/minute/ in dataset)",
-)
 @click.pass_context
-def train(ctx: click.Context, start: str, end: str, model_dir: Path, name: str | None, hybrid: bool) -> None:
+def train(ctx: click.Context, start: str, end: str, model_dir: Path, name: str | None) -> None:
     """Train ranker and classifiers on any date range and save models."""
     from trading_bot.config import Config
     from trading_bot.learning.period_runner import PeriodRunner
 
     cfg = Config(ctx.obj["config_path"])
 
-    console.print(f"[bold green]Training models[/] {start} → {end}" + (" [hybrid]" if hybrid else ""))
+    console.print(f"[bold green]Training models[/] {start} → {end}")
     runner = PeriodRunner(cfg)
-    out_dir = runner.train(start, end, model_dir, name=name, hybrid=hybrid)
+    out_dir = runner.train(start, end, model_dir, name=name)
     for note in runner.last_period_notes:
         console.print(f"[yellow]{note}[/]")
     console.print(f"[bold]Models saved to:[/] {out_dir}")
@@ -143,18 +126,17 @@ def train(ctx: click.Context, start: str, end: str, model_dir: Path, name: str |
     default=Path("hermes/reports/evaluation"),
     show_default=True,
 )
-@click.option("--hybrid", is_flag=True, help="Use 5m timing model for intraday entries")
 @click.pass_context
-def evaluate(ctx: click.Context, model_dir: Path, start: str, end: str, output_dir: Path, hybrid: bool) -> None:
+def evaluate(ctx: click.Context, model_dir: Path, start: str, end: str, output_dir: Path) -> None:
     """Backtest a saved model on any date range (independent of training period)."""
     from trading_bot.config import Config
     from trading_bot.learning.period_runner import PeriodRunner
 
     cfg = Config(ctx.obj["config_path"])
-    console.print(f"[bold green]Evaluating[/] {model_dir} on {start} → {end}" + (" [hybrid]" if hybrid else ""))
+    console.print(f"[bold green]Evaluating[/] {model_dir} on {start} → {end}")
 
     runner = PeriodRunner(cfg)
-    metrics = runner.evaluate(model_dir, start, end, output_dir, hybrid=hybrid)
+    metrics = runner.evaluate(model_dir, start, end, output_dir)
     for note in runner.last_period_notes:
         console.print(f"[yellow]{note}[/]")
     console.print(f"[bold]Objective J:[/] {metrics.objective_j:.4f}")
@@ -195,7 +177,6 @@ def models_list(models_dir: Path) -> None:
     table.add_column("Path", style="bold")
     table.add_column("Train start")
     table.add_column("Train end")
-    table.add_column("Hybrid", justify="center")
     table.add_column("Symbols", justify="right")
     table.add_column("Rows", justify="right")
     table.add_column("Files")
@@ -208,13 +189,10 @@ def models_list(models_dir: Path) -> None:
             path_str = str(path)
         symbols = run["symbols"]
         rows = run["feature_rows"]
-        hybrid_flag = run.get("hybrid")
-        hybrid_str = "yes" if hybrid_flag else ("no" if hybrid_flag is False else "—")
         table.add_row(
             path_str,
             str(run["train_start"] or "—"),
             str(run["train_end"] or "—"),
-            hybrid_str,
             str(symbols) if symbols is not None else "—",
             str(rows) if rows is not None else "—",
             ", ".join(run["model_files"]),
@@ -227,76 +205,11 @@ def models_list(models_dir: Path) -> None:
     )
 
 
-@main.group()
-def bars() -> None:
-    """Query intraday bars from the configured dataset."""
-
-
-@bars.command("show")
-@click.option("--symbol", required=True, help="NSE tradingsymbol, e.g. ANGELONE")
-@click.option("--date", "day", required=True, help="Session date YYYY-MM-DD")
-@click.option("--interval", default="5minute", show_default=True)
-@click.pass_context
-def bars_show(ctx: click.Context, symbol: str, day: str, interval: str) -> None:
-    """Print 5m bars for one symbol on one day."""
-    from datetime import date as date_cls
-
-    from trading_bot.config import Config
-    from trading_bot.data.bars import BarStore
-
-    store = BarStore(cfg=Config(ctx.obj["config_path"]))
-    df, session, note = store.get_bars_resolved(
-        symbol, date_cls.fromisoformat(day), interval=interval
-    )
-    if note:
-        console.print(f"[yellow]{note}[/]")
-    if df.empty:
-        console.print(f"[yellow]No bars for {symbol.upper()} on {session.isoformat()}[/]")
-        return
-    console.print(df.to_string(index=False))
-
-
-@bars.command("symbols")
-@click.option("--date", "day", required=True, help="Session date YYYY-MM-DD")
-@click.option("--interval", default="5minute", show_default=True)
-@click.pass_context
-def bars_symbols(ctx: click.Context, day: str, interval: str) -> None:
-    """List symbols with 5m data on a given day."""
-    from datetime import date as date_cls
-
-    from trading_bot.config import Config
-    from trading_bot.data.bars import BarStore
-
-    symbols, session, note = BarStore(cfg=Config(ctx.obj["config_path"])).list_symbols_resolved(
-        date_cls.fromisoformat(day), interval=interval
-    )
-    if note:
-        console.print(f"[yellow]{note}[/]")
-    console.print(f"[bold]{len(symbols)} symbols[/] on {session.isoformat()}")
-    console.print(", ".join(symbols))
-
-
-@bars.command("dates")
-@click.option("--symbol", required=True, help="NSE tradingsymbol")
-@click.option("--interval", default="5minute", show_default=True)
-@click.pass_context
-def bars_dates(ctx: click.Context, symbol: str, interval: str) -> None:
-    """List session dates with 5m data for a symbol."""
-    from trading_bot.config import Config
-    from trading_bot.data.bars import BarStore
-
-    dates = BarStore(cfg=Config(ctx.obj["config_path"])).list_dates(symbol, interval=interval)
-    console.print(f"[bold]{len(dates)} days[/] for {symbol.upper()}")
-    for d in dates:
-        console.print(d.isoformat())
-
-
 @main.command()
 @click.option("--model-dir", type=Path, default=Path("models"), show_default=True)
 @click.option("--ledger", type=Path, default=Path("hermes/reports/paper_ledger.csv"), show_default=True)
-@click.option("--hybrid", is_flag=True, help="Use hybrid model (5m entry timing + bar-level exits).")
 @click.pass_context
-def paper(ctx: click.Context, model_dir: Path, ledger: Path, hybrid: bool) -> None:
+def paper(ctx: click.Context, model_dir: Path, ledger: Path) -> None:
     """Run one paper-trading session (today's signals → simulated fills)."""
     from trading_bot.config import Config
     from trading_bot.paper.ledger import PaperLedger
@@ -310,7 +223,7 @@ def paper(ctx: click.Context, model_dir: Path, ledger: Path, hybrid: bool) -> No
         console.print("[bold red]Trading PAUSED[/] — degradation threshold triggered. Run `train` first.")
         return
 
-    pl = PaperLedger(cfg, model_dir=model_dir, ledger_path=ledger, hybrid=hybrid)
+    pl = PaperLedger(cfg, model_dir=model_dir, ledger_path=ledger)
     result = pl.run_session()
     console.print(f"[bold green]Paper session complete[/]")
     console.print(f"  New entries: {result['new_entries']}")

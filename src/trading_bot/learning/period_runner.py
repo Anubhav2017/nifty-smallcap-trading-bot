@@ -13,7 +13,6 @@ import pandas as pd
 
 from trading_bot.backtest.costs import CostModel
 from trading_bot.backtest.engine import BacktestEngine
-from trading_bot.backtest.hybrid_engine import HybridBacktestEngine
 from trading_bot.backtest.metrics import (
     calmar_ratio,
     compute_objective_j,
@@ -29,10 +28,8 @@ from trading_bot.features.build import build
 from trading_bot.models.training import load as load_model_bundle
 from trading_bot.models.training import save as save_models
 from trading_bot.models.training import train as train_models
-from trading_bot.models.training import train_intraday_timing
 from trading_bot.learning.train_progress import configure_train_logging, train_step
 from trading_bot.risk.engine import RiskEngine
-from trading_bot.risk.hybrid_signals import generate_hybrid_signals
 from trading_bot.risk.signals import generate_signals
 from trading_bot.types import FoldMetrics, Horizon
 
@@ -147,7 +144,6 @@ class PeriodRunner:
             "train_end": data.get("train_end"),
             "feature_rows": data.get("feature_rows"),
             "symbols": data.get("symbols"),
-            "hybrid": data.get("hybrid"),
             "has_manifest": manifest_path.exists() and bool(data),
             "model_files": PeriodRunner._model_files(run_dir),
         }
@@ -159,11 +155,10 @@ class PeriodRunner:
         model_dir: Path,
         *,
         name: str | None = None,
-        hybrid: bool = False,
     ) -> Path:
         """Train on [start, end] and persist models + run_manifest.json."""
         configure_train_logging()
-        total_steps = 6 if hybrid else 5
+        total_steps = 5
         step = 1
 
         start, end, _notes = self._resolve_period(start_date, end_date)
@@ -230,26 +225,6 @@ class PeriodRunner:
         bundle = train_models(self._cfg, feature_data, train_dates)
         step += 1
 
-        intraday_rows = 0
-        if hybrid:
-            train_step(step, total_steps, "Building 5m intraday matrix and training timing model")
-            bundle.intraday_timing, intraday_rows = train_intraday_timing(
-                self._cfg, feature_data, train_dates
-            )
-            if bundle.intraday_timing is None:
-                logger.warning(
-                    "Hybrid timing model not trained — no 5m rows in range. "
-                    "Populate ohlcv/minute/ in the active dataset for hybrid mode."
-                )
-            else:
-                train_step(
-                    step,
-                    total_steps,
-                    "Trained intraday timing model",
-                    intraday_rows=intraday_rows,
-                )
-            step += 1
-
         train_step(step, total_steps, "Saving models", output=str(out_dir))
         save_models(bundle, out_dir)
         self._write_manifest(
@@ -258,14 +233,10 @@ class PeriodRunner:
             train_end=end,
             rows=len(feature_data),
             symbols=int(feature_data["symbol"].nunique()),
-            hybrid=hybrid and bundle.intraday_timing is not None,
-            intraday_rows=intraday_rows,
         )
         logger.info("Training complete → %s", out_dir)
         fitted = ["ranker"] if bundle.ranker._fitted else []
         fitted.extend(h.value for h, c in bundle.classifiers.items() if c._fitted)
-        if bundle.intraday_timing is not None and bundle.intraday_timing._fitted:
-            fitted.append("intraday_timing")
         logger.info(
             "[train] Complete: models=%s → %s",
             ",".join(fitted) or "none",
@@ -279,8 +250,6 @@ class PeriodRunner:
         start_date: str,
         end_date: str,
         output_dir: Path,
-        *,
-        hybrid: bool = False,
     ) -> FoldMetrics:
         """Run a saved model on [start, end] and write metrics + trade log."""
         start, end, _notes = self._resolve_period(start_date, end_date)
@@ -300,10 +269,6 @@ class PeriodRunner:
         bundle = load_model_bundle(self._cfg, Path(model_dir))
         if not bundle.ranker._fitted:
             raise RuntimeError(f"No fitted ranker found in {model_dir}")
-        if hybrid and (bundle.intraday_timing is None or not bundle.intraday_timing._fitted):
-            raise RuntimeError(
-                f"No intraday_timing.lgb in {model_dir}. Re-train with --hybrid."
-            )
 
         fetch_start = start - timedelta(days=_FEATURE_LOOKBACK_DAYS)
         ohlcv_by_token = load_ohlcv(fetch_start, end, self._cfg)
@@ -315,19 +280,14 @@ class PeriodRunner:
             raise RuntimeError("Feature matrix is empty for evaluation period.")
 
         risk_engine = RiskEngine(self._cfg)
-        signal_fn = generate_hybrid_signals if hybrid else generate_signals
         signals_by_date: dict[date, list] = {}
         for d in test_dates:
-            sigs = signal_fn(bundle, features, d, risk_engine)
+            sigs = generate_signals(bundle, features, d, risk_engine)
             if sigs:
                 signals_by_date[d] = sigs
 
         cost_model = CostModel(self._cfg)
-        engine = (
-            HybridBacktestEngine(self._cfg, cost_model, risk_engine)
-            if hybrid
-            else BacktestEngine(self._cfg, cost_model, risk_engine)
-        )
+        engine = BacktestEngine(self._cfg, cost_model, risk_engine)
         closed_positions, equity_curve = engine.run(
             signals_by_date,
             ohlcv_by_token,
@@ -387,20 +347,14 @@ class PeriodRunner:
         train_end: date,
         rows: int,
         symbols: int,
-        hybrid: bool = False,
-        intraday_rows: int = 0,
     ) -> None:
         manifest = {
             "train_start": train_start.isoformat(),
             "train_end": train_end.isoformat(),
             "feature_rows": rows,
             "symbols": symbols,
-            "hybrid": hybrid,
-            "intraday_rows": intraday_rows,
             "models": ["ranker.lgb", "classifier_swing.lgb", "classifier_positional.lgb"],
         }
-        if hybrid:
-            manifest["models"].append("intraday_timing.lgb")
         (out_dir / "run_manifest.json").write_text(json.dumps(manifest, indent=2))
 
     @staticmethod
