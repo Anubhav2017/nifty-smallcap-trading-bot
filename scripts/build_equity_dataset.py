@@ -104,6 +104,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip Kite OHLCV download (universe refresh still runs if configured)",
     )
     parser.add_argument(
+        "--skip-minute",
+        action="store_true",
+        help="Skip minute-level OHLCV intervals (only daily/higher intervals are downloaded)",
+    )
+    parser.add_argument(
         "--skip-bse",
         action="store_true",
         help="Skip BSE announcements download even if bse_config is set",
@@ -116,11 +121,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _filter_intervals(intervals: list[str], *, skip_minute: bool) -> list[str]:
+    """Return the configured intervals, optionally dropping minute-level ones."""
+    if not skip_minute:
+        return list(intervals)
+    return [iv for iv in intervals if "minute" not in iv.lower()]
+
+
 def _write_manifest(
     cfg: DatasetBuildConfig,
     symbols: list[str],
     enriched: pd.DataFrame,
     *,
+    intervals: list[str] | None = None,
     bse_dir: Path | None = None,
     screener_dir: Path | None = None,
 ) -> None:
@@ -141,7 +154,7 @@ def _write_manifest(
             "enriched_csv": "universe/universe_enriched.csv",
         },
         "date_range": {"from": cfg.from_date, "to": cfg.to_date},
-        "intervals": cfg.intervals,
+        "intervals": list(intervals) if intervals is not None else cfg.intervals,
         "ohlcv_path_template": "ohlcv/{interval}/{symbol}.csv",
         "columns": ["date", "open", "high", "low", "close", "volume"],
         "instruments": {
@@ -192,6 +205,8 @@ def _download_ohlcv(
     symbols: list[str],
     api_key: str,
     access_token: str,
+    *,
+    intervals: list[str] | None = None,
 ) -> pd.DataFrame:
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
@@ -213,12 +228,13 @@ def _download_ohlcv(
     print(f"Universe enriched: {found}/{len(symbols)} symbols mapped to Kite tokens -> {enriched_path}")
 
     tradable = enriched.loc[enriched["found"], "symbol"].tolist()
+    effective_intervals = list(intervals) if intervals is not None else list(cfg.intervals)
     run_download(
         kite=kite,
         symbols=tradable,
         from_dt=cfg.from_dt,
         to_dt=cfg.to_dt,
-        intervals=cfg.intervals,
+        intervals=effective_intervals,
         output_dir=cfg.ohlcv_dir,
         chunk_days=cfg.chunk_days,
         sleep_seconds=cfg.sleep_seconds,
@@ -261,10 +277,19 @@ def build(
     access_token: str,
     *,
     skip_ohlcv: bool = False,
+    skip_minute: bool = False,
     skip_bse: bool = False,
     skip_screener: bool = False,
 ) -> None:
     symbols = _refresh_universe(cfg)
+
+    effective_intervals = _filter_intervals(cfg.intervals, skip_minute=skip_minute)
+    if skip_minute:
+        dropped = [iv for iv in cfg.intervals if iv not in effective_intervals]
+        if dropped:
+            print(f"--skip-minute: dropping interval(s) {dropped}; will download {effective_intervals}")
+        else:
+            print("--skip-minute set, but config has no minute-level intervals to drop.")
 
     if skip_ohlcv:
         enriched_path = cfg.universe_dir / "universe_enriched.csv"
@@ -273,8 +298,17 @@ def build(
         else:
             enriched = pd.DataFrame({"symbol": symbols, "found": [False] * len(symbols)})
             print("Skipping OHLCV — universe_enriched.csv not found; manifest will list all symbols as missing from Kite.")
+    elif not effective_intervals:
+        enriched_path = cfg.universe_dir / "universe_enriched.csv"
+        if enriched_path.is_file():
+            enriched = pd.read_csv(enriched_path)
+        else:
+            enriched = pd.DataFrame({"symbol": symbols, "found": [False] * len(symbols)})
+        print("All configured intervals were skipped — no OHLCV download will run.")
     else:
-        enriched = _download_ohlcv(cfg, symbols, api_key, access_token)
+        enriched = _download_ohlcv(
+            cfg, symbols, api_key, access_token, intervals=effective_intervals
+        )
 
     bse_dir: Path | None = None
     if not skip_bse and cfg.bse_config is not None:
@@ -288,7 +322,14 @@ def build(
     elif cfg.screener_config is None and not skip_screener:
         print("\nScreener Excel: skipped (no screener_config in dataset config)")
 
-    _write_manifest(cfg, symbols, enriched, bse_dir=bse_dir, screener_dir=screener_dir)
+    _write_manifest(
+        cfg,
+        symbols,
+        enriched,
+        intervals=effective_intervals,
+        bse_dir=bse_dir,
+        screener_dir=screener_dir,
+    )
     print(f"\nDataset ready under: {cfg.dataset_root}")
     print("Load later: from dataset_loader import load_ohlcv, load_manifest, list_symbols")
 
@@ -312,6 +353,7 @@ def main() -> None:
         args.api_key,
         args.access_token,
         skip_ohlcv=args.skip_ohlcv,
+        skip_minute=args.skip_minute,
         skip_bse=args.skip_bse,
         skip_screener=args.skip_screener,
     )
