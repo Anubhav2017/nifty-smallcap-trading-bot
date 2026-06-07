@@ -220,6 +220,28 @@ python scripts/download_index_and_update_ohlcv.py
 
 Requires `KITE_API_KEY` and `KITE_ACCESS_TOKEN` in `.env`.
 
+### Building a fresh dataset
+
+```bash
+# Full build — universe + OHLCV (all configured intervals) + BSE + Screener
+python scripts/build_equity_dataset.py --config config/dataset.smallcap250.json
+
+# Skip minute bars (only download daily / higher intervals from cfg.intervals)
+python scripts/build_equity_dataset.py --skip-minute
+
+# Other granular skip flags (combine freely)
+python scripts/build_equity_dataset.py --skip-ohlcv      # universe refresh only
+python scripts/build_equity_dataset.py --skip-bse        # no BSE announcements
+python scripts/build_equity_dataset.py --skip-screener   # no Screener.in Excel
+```
+
+`--skip-minute` filters every interval whose name contains `minute`
+(`minute`, `2minute`, `5minute`, `15minute`, `30minute`, `60minute`) out of
+`cfg.intervals` before the OHLCV download. The resulting interval list is
+recorded in `manifest.json`, so downstream loaders see exactly what was
+downloaded. If every configured interval is minute-level, the OHLCV step is
+skipped entirely (universe + auxiliary downloads still run).
+
 ---
 
 ## Project layout
@@ -268,6 +290,7 @@ dashboard/
 
 scripts/
   backtest_move_predictor.py    Run backtest → reports/move_predictor/
+  build_equity_dataset.py       End-to-end dataset builder (--skip-ohlcv / --skip-minute / --skip-bse / --skip-screener)
   kite_login.py                 Kite Connect OAuth login (token expires daily)
   download_index_and_update_ohlcv.py  Update daily OHLCV + index via Kite
   download_kite_ohlcv.py        Download full OHLCV history
