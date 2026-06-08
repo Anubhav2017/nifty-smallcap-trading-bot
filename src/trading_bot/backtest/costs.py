@@ -6,6 +6,24 @@ from trading_bot.config import Config
 from trading_bot.types import Horizon
 
 
+def estimate_cost_per_share(cfg: Config, price: float) -> float:
+    """Estimate one-way per-share transaction cost at *price* (INR).
+
+    Used for expected-value gating at signal-build time, where only the entry
+    price is known.  Mirrors the per-leg components of :class:`CostModel`
+    (brokerage, STT, stamp, exchange, SEBI, GST, minimum slippage floor).
+    """
+    costs = cfg.costs
+    brokerage = price * costs.get("brokerage_pct", 0.03) / 100.0
+    stt = price * costs.get("stt_delivery_pct", 0.1) / 100.0
+    stamp = price * costs.get("stamp_duty_pct", 0.015) / 100.0
+    exchange = price * costs.get("exchange_txn_charge_pct", 0.00345) / 100.0
+    sebi = price * costs.get("sebi_turnover_fee_pct", 0.0001) / 100.0
+    gst = (brokerage + exchange) * costs.get("gst_on_charges_pct", 18.0) / 100.0
+    slippage = price * costs.get("slippage_min_pct", 0.05) / 100.0
+    return brokerage + stt + stamp + exchange + sebi + gst + slippage
+
+
 class CostModel:
     """Compute round-trip transaction costs for Indian cash equity delivery trades.
 

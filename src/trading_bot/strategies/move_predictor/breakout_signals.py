@@ -23,7 +23,7 @@ import pandas as pd
 
 from trading_bot.config import Config
 from trading_bot.models.exit_policy import ExitPolicy
-from trading_bot.risk.signals import _estimate_cost_per_share
+from trading_bot.backtest.costs import estimate_cost_per_share
 from trading_bot.types import Horizon, Instrument, Signal
 
 logger = logging.getLogger(__name__)
@@ -136,7 +136,7 @@ def generate_breakout_signals(
         if entry_price <= 0 or atr <= 0:
             continue
 
-        cost = _estimate_cost_per_share(cfg, entry_price)
+        cost = estimate_cost_per_share(cfg, entry_price)
         sig = exit_policy.build_signal(
             instrument=inst,
             horizon=horizon,

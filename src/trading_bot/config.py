@@ -1,4 +1,4 @@
-"""Load and expose strategy config from strategy.yaml."""
+"""Load and expose strategy config from config/move_predictor.yaml."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 import yaml
 
 
-_DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "strategy.yaml"
+_DEFAULT_CONFIG_PATH = Path(__file__).parents[2] / "config" / "move_predictor.yaml"
 
 
 def load_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -46,10 +46,6 @@ class Config:
         return self._raw["entry"]
 
     @property
-    def hybrid(self) -> dict:
-        return self._raw.get("hybrid", {})
-
-    @property
     def exit(self) -> dict:
         return self._raw["exit"]
 
@@ -60,19 +56,3 @@ class Config:
     @property
     def costs(self) -> dict:
         return self._raw["costs"]
-
-    @property
-    def walk_forward(self) -> dict:
-        return self._raw["walk_forward"]
-
-    @property
-    def objective(self) -> dict:
-        return self._raw["objective"]
-
-    @property
-    def retrain(self) -> dict:
-        return self._raw["retrain"]
-
-    @property
-    def hermes(self) -> dict:
-        return self._raw["hermes"]

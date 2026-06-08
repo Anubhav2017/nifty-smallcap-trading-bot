@@ -48,16 +48,32 @@ def _slug(name: str) -> str:
     return re.sub(r"_+", "_", s).strip("_")
 
 
-def parse_dates(row: pd.Series) -> list[pd.Timestamp]:
-    dates: list[pd.Timestamp] = []
-    for val in row.iloc[1:]:
+def parse_dates_with_positions(row: pd.Series) -> list[tuple[int, pd.Timestamp]]:
+    """Return ``(column_position, date)`` for each parseable date cell in *row*.
+
+    Screener sheets are right-aligned when a company has fewer reporting periods
+    than the template's column count, so the date cells (and their value cells
+    below) may start well after column 1.  Capturing the position lets callers
+    read each metric's value from the *same* column as its date, instead of
+    assuming dates occupy columns ``1..len(dates)`` (which silently produced
+    all-NaN reads for short-history / Nov-FY companies such as PFIZER, TIMKEN,
+    BAYERCROP, BLUEJET, FIVESTAR).
+    """
+    out: list[tuple[int, pd.Timestamp]] = []
+    values = list(row)
+    for pos in range(1, len(values)):  # column 0 is the label
+        val = values[pos]
         if pd.isna(val):
             continue
         try:
-            dates.append(pd.Timestamp(val).normalize())
+            out.append((pos, pd.Timestamp(val).normalize()))
         except (TypeError, ValueError):
             continue
-    return dates
+    return out
+
+
+def parse_dates(row: pd.Series) -> list[pd.Timestamp]:
+    return [dt for _pos, dt in parse_dates_with_positions(row)]
 
 
 def find_sections(df: pd.DataFrame) -> list[tuple[int, str]]:
@@ -87,9 +103,11 @@ def parse_screener_excel(path: Path) -> pd.DataFrame:
         if date_row_idx is None:
             continue
 
-        dates = parse_dates(block.iloc[date_row_idx])
-        if not dates:
+        date_pairs = parse_dates_with_positions(block.iloc[date_row_idx])
+        if not date_pairs:
             continue
+        cols = [pos for pos, _dt in date_pairs]
+        dates = [dt for _pos, dt in date_pairs]
 
         for j in range(date_row_idx + 1, len(block)):
             metric = block.iloc[j, 0]
@@ -98,8 +116,9 @@ def parse_screener_excel(path: Path) -> pd.DataFrame:
             metric = metric.strip()
             if metric not in _KEY_METRICS:
                 continue
-            values = block.iloc[j, 1 : 1 + len(dates)]
-            for dt, val in zip(dates, values):
+            row_vals = list(block.iloc[j])
+            for dt, col in zip(dates, cols):
+                val = row_vals[col] if col < len(row_vals) else None
                 if pd.isna(val):
                     continue
                 try:
@@ -155,7 +174,7 @@ def _derived_ratios(df: pd.DataFrame) -> pd.DataFrame:
         if not mask.any() or "f_sales" not in out.columns:
             continue
         sub = out.loc[mask].sort_values("report_date")
-        out.loc[mask, "f_sales_growth"] = sub["f_sales"].pct_change().values
+        out.loc[mask, "f_sales_growth"] = sub["f_sales"].pct_change(fill_method=None).values
     return out
 
 
@@ -195,7 +214,9 @@ def screener_file(screener_dir: Path, symbol: str) -> Path:
 
 def _section_table(block: pd.DataFrame, date_row_idx: int, dates: List[pd.Timestamp]) -> pd.DataFrame:
     rows: list[dict] = []
-    date_cols = [d.strftime("%Y-%m-%d") for d in dates]
+    date_pairs = parse_dates_with_positions(block.iloc[date_row_idx])
+    cols = [pos for pos, _dt in date_pairs]
+    date_cols = [dt.strftime("%Y-%m-%d") for _pos, dt in date_pairs]
     for j in range(date_row_idx + 1, len(block)):
         metric = block.iloc[j, 0]
         if not isinstance(metric, str) or not metric.strip():
@@ -203,10 +224,10 @@ def _section_table(block: pd.DataFrame, date_row_idx: int, dates: List[pd.Timest
         metric = metric.strip()
         if metric == "Report Date":
             continue
-        values = block.iloc[j, 1 : 1 + len(dates)]
+        row_vals = list(block.iloc[j])
         row = {"Metric": metric}
-        for col, val in zip(date_cols, values):
-            row[col] = val
+        for col_name, col in zip(date_cols, cols):
+            row[col_name] = row_vals[col] if col < len(row_vals) else None
         if any(pd.notna(v) and str(v) != "nan" for k, v in row.items() if k != "Metric"):
             rows.append(row)
     if not rows:
@@ -463,8 +484,8 @@ def load_balance_sheet_extended(path: Path) -> pd.DataFrame:
             ]
         )
 
-    dates = parse_dates(block.iloc[date_row_idx])
-    if not dates:
+    date_pairs = parse_dates_with_positions(block.iloc[date_row_idx])
+    if not date_pairs:
         return pd.DataFrame(
             columns=[
                 "report_date",
@@ -475,6 +496,8 @@ def load_balance_sheet_extended(path: Path) -> pd.DataFrame:
                 "shares",
             ]
         )
+    cols = [pos for pos, _dt in date_pairs]
+    dates = [dt for _pos, dt in date_pairs]
 
     metric_rows: dict[str, list[float | None]] = {
         "other_liabilities": [None] * len(dates),
@@ -490,9 +513,10 @@ def load_balance_sheet_extended(path: Path) -> pd.DataFrame:
         if not isinstance(metric, str) or not metric.strip():
             continue
         name = metric.strip()
-        values = block.iloc[j, 1 : 1 + len(dates)]
+        row_vals = list(block.iloc[j])
         nums: list[float | None] = []
-        for val in values:
+        for col in cols:
+            val = row_vals[col] if col < len(row_vals) else None
             if pd.isna(val):
                 nums.append(None)
                 continue

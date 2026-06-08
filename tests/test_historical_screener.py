@@ -51,6 +51,48 @@ def _write_screener(path: Path) -> None:
         pd.DataFrame(rows).to_excel(writer, sheet_name="Data Sheet", header=False, index=False)
 
 
+def _pad(label, *vals, lead=6):
+    """Right-align a row: label in col 0, then *lead* blank columns, then vals.
+
+    Mimics Screener.in sheets for companies with fewer reporting periods than
+    the template width (e.g. PFIZER/TIMKEN), where the populated columns are
+    pushed to the right and columns 1..lead are blank.
+    """
+    return [label] + [None] * lead + list(vals)
+
+
+def _write_screener_right_aligned(path: Path) -> None:
+    """Same data as _write_screener but with dates/values right-aligned."""
+    rows = [
+        ["COMPANY NAME", "Test Co"],
+        ["PROFIT & LOSS", None],
+        _pad("Report Date", "2023-03-31", "2024-03-31"),
+        _pad("Sales", 900.0, 1000.0),
+        _pad("Net profit", 80.0, 100.0),
+        _pad("Operating Profit", 120.0, 150.0),
+        ["Quarters", None],
+        _pad("Report Date", "2024-03-31", "2024-06-30"),
+        _pad("Sales", 240.0, 260.0),
+        _pad("Operating Profit", 30.0, 35.0),
+        _pad("Net profit", 20.0, 22.0),
+        ["BALANCE SHEET", None],
+        _pad("Report Date", "2023-03-31", "2024-03-31"),
+        _pad("Equity Share Capital", 100.0, 100.0),
+        _pad("Reserves", 400.0, 500.0),
+        _pad("Borrowings", 200.0, 250.0),
+        _pad("Other Liabilities", 80.0, 90.0),
+        _pad("Total", 880.0, 990.0),
+        _pad("Net Block", 300.0, 350.0),
+        _pad("Other Assets", 580.0, 640.0),
+        _pad("Total", 880.0, 990.0),
+        _pad("Cash & Bank", 50.0, 60.0),
+        _pad("No. of Equity Shares", 10000000.0, 10000000.0),
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        pd.DataFrame(rows).to_excel(writer, sheet_name="Data Sheet", header=False, index=False)
+
+
 @pytest.fixture
 def mini_dataset(tmp_path: Path) -> Path:
     root = tmp_path / "dataset"
@@ -103,3 +145,31 @@ def test_snapshot_integration(mini_dataset: Path) -> None:
     assert snap.close is not None
     assert snap.rsi_14 is not None
     assert snap.market_cap_cr is not None
+
+
+def test_right_aligned_sheet_parses(tmp_path: Path) -> None:
+    """Regression: dates/values right-aligned (blank leading columns) must parse.
+
+    Reproduces the PFIZER/TIMKEN/BAYERCROP/BLUEJET/FIVESTAR case where the
+    populated columns are pushed right; the parser must read each value from the
+    same column as its date, not a fixed slice starting at column 1.
+    """
+    sdir = tmp_path / "screener_excel"
+    _write_screener_right_aligned(sdir / f"RACO{SCREENER_SUFFIX}")
+
+    fund = load_symbol_fundamentals(sdir, "RACO")
+    assert not fund.empty, "right-aligned sheet parsed to empty fundamentals"
+
+    pl = fund[fund["period_type"] == "annual_pl"].sort_values("report_date")
+    latest = pl.iloc[-1]
+    assert latest["f_sales"] == pytest.approx(1000.0)
+    assert latest["f_net_profit"] == pytest.approx(100.0)
+
+    bs = fund[fund["period_type"] == "annual_bs"].sort_values("report_date").iloc[-1]
+    assert bs["f_borrowings"] == pytest.approx(250.0)
+    assert bs["f_reserves"] == pytest.approx(500.0)
+
+    bs_ext = load_balance_sheet_extended(sdir / f"RACO{SCREENER_SUFFIX}")
+    assert not bs_ext.empty
+    assert bs_ext.iloc[-1]["total_assets"] == pytest.approx(990.0)
+    assert bs_ext.iloc[-1]["shares"] == pytest.approx(10000000.0)

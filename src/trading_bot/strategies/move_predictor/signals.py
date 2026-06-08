@@ -13,7 +13,7 @@ from trading_bot.strategies.move_predictor.fundamental_screen import (
     FundamentalScreenConfig,
     passes_fundamental_screen,
 )
-from trading_bot.risk.signals import _estimate_cost_per_share
+from trading_bot.backtest.costs import estimate_cost_per_share
 from trading_bot.strategies.move_predictor.model import MovePredictorModel
 from trading_bot.types import Horizon, Instrument, Signal
 
@@ -121,7 +121,7 @@ def generate_move_predictor_signals(
             continue
 
         win_prob = float(row["_score"])
-        cost = _estimate_cost_per_share(cfg, entry_price)
+        cost = estimate_cost_per_share(cfg, entry_price)
         sig = exit_policy.build_signal(
             instrument=inst,
             horizon=horizon,

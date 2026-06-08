@@ -13,11 +13,14 @@ fundamental screening, BSE announcement signals, and a full Indian cost model.
 
 ```bash
 cd nifty-smallcap-trading-bot
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Python 3.10+
 pip install -r requirements.txt
 pip install -e .
 
-# Run backtest
+# Run the walk-forward backtest (CLI)
+trading-bot move-predictor
+
+# …or via the verbose-logging script
 python scripts/backtest_move_predictor.py
 
 # Launch dashboard
@@ -26,14 +29,33 @@ streamlit run dashboard/app.py
 
 ---
 
+## Command-line interface
+
+Installed as `trading-bot` (entry point) — or run `python -m trading_bot.cli`.
+
+| Command | Description |
+|---|---|
+| `trading-bot move-predictor` | Train + walk-forward backtest the move predictor; writes a timestamped run folder |
+| `trading-bot report` | Print a summary of the latest backtest run |
+| `trading-bot kite status` | Check Kite Connect / MCP login status |
+
+```bash
+# Custom config / output directory
+trading-bot -c config/move_predictor.yaml move-predictor -o reports/move_predictor
+```
+
+The default config is **`config/move_predictor.yaml`** (used whenever `-c` is omitted).
+
+---
+
 ## What it does
 
 | Capability | Description |
 |---|---|
-| **Move Predictor** | LightGBM classifier: P(next-day return ≥ 1.5%) on 16 features |
+| **Move Predictor** | LightGBM classifier: P(next-day return ≥ 1.5%) on 24 features (12 technical + 12 BSE) |
 | **Walk-forward** | Quarterly retraining with expanding data window, no lookahead |
 | **Fundamental screen** | ROCE, D/E, P/E, profit growth (annual + quarterly), price > DMA |
-| **BSE events** | Bulk acquisition, promoter buys, result blackout, corp actions |
+| **BSE events** | 12 announcement features: result blackout, bulk/promoter buys, corp actions, order wins, acquisitions, capex, credit ratings, disclosure intensity |
 | **Breakout signal** | Rule-based 52-week high breakout with 2× volume confirmation |
 | **Regime filter** | Trades only when ≥40% of universe is above 20D SMA |
 | **Risk engine** | ATR-based SL (capped at 5%), 2:1 R:R TP, SL cooldown per symbol |
@@ -56,7 +78,7 @@ dataset_smallcap250/
   enrich_panel_fundamentals()     Point-in-time fundamental ratios
           │
           ▼
-  LightGBM MovePredictorModel     Binary classifier (16 features)
+  LightGBM MovePredictorModel     Binary classifier (24 features)
   + BreakoutSignal                Rule-based 52W high filter
           │
           ▼
@@ -89,10 +111,14 @@ Single config file: **`config/move_predictor.yaml`**
 ## Running the backtest
 
 ```bash
-# Default config (config/move_predictor.yaml) → saves to reports/move_predictor/
+# CLI (recommended) → writes to reports/move_predictor/<run_id>/
+trading-bot move-predictor
+
+# Verbose-logging script → also writes to reports/move_predictor/<run_id>/
 python scripts/backtest_move_predictor.py
 
-# Custom config or output dir
+# Custom config or output dir (either entry point)
+trading-bot -c config/move_predictor.yaml move-predictor -o reports/move_predictor
 python scripts/backtest_move_predictor.py -c config/move_predictor.yaml -o reports/move_predictor
 ```
 
@@ -136,7 +162,7 @@ Dataset folder is read from the sidebar (defaults to `dataset_smallcap250`).
 
 ---
 
-## Features (16 total)
+## Features (24 total — 12 technical + 12 BSE)
 
 **Technical (lagged 1 day — no lookahead):**
 
@@ -157,13 +183,23 @@ Dataset folder is read from the sidebar (defaults to `dataset_smallcap250`).
 
 **BSE announcement (lagged 1 day):**
 
+All 12 features are sourced from `announcements_extracted.csv` (normalised event
+`type`), with backward-only rolling windows (no lookahead).
+
 | Feature | Signal |
 |---|---|
-| `bse_bulk_buy_last5d` | SAST Reg 10 bulk acquisition (+3.5% avg next-day) |
-| `bse_promoter_buy_7d` | Reg 29(1) promoter stake increase (+0.88%) |
-| `bse_result_blackout` | Results filed last 3 days — entry avoidance (-0.37%) |
-| `bse_corp_action_5d` | Bonus/dividend/record date (+0.35%) |
+| `bse_result_blackout` | Results filed in last 3 days — entry avoidance |
+| `bse_bulk_buy_last5d` | SAST Reg 10 bulk acquisition |
+| `bse_promoter_buy_7d` | Reg 29(1) promoter stake increase |
+| `bse_corp_action_5d` | Bonus / dividend / record date |
 | `bse_window_closed` | Trading window closure (pre-results) |
+| `bse_results_5d` | Results filed in last 5 days |
+| `bse_earnings_call_5d` | Earnings / analyst call in last 5 days |
+| `bse_order_win_10d` | Order / contract win in last 10 days |
+| `bse_acquisition_10d` | Acquisition / investment in last 10 days |
+| `bse_capacity_expansion_15d` | Capacity expansion / capex in last 15 days |
+| `bse_credit_rating_10d` | Credit rating action in last 10 days |
+| `bse_ann_count_5d` | Count of announcements in last 5 days (disclosure intensity) |
 
 ---
 
@@ -205,6 +241,28 @@ python scripts/extract_corporate_actions.py
 The extractor parses bonus ratios, split face-value changes, dividend amounts per share,
 and record dates from announcement headlines. For events where the ratio is only in the
 attached PDF, it reads the PDF using `pymupdf` and applies sanity bounds before saving.
+
+### Per-stock announcement summaries (with PDF body parsing)
+
+```bash
+# All symbols → writes  bse_announcements/{SYMBOL}/announcements_extracted.csv
+python scripts/extract_announcements_per_stock.py
+
+# Single stock for testing
+python scripts/extract_announcements_per_stock.py --symbol AARTIIND --force
+
+# Custom dataset / parallelism
+python scripts/extract_announcements_per_stock.py --dataset dataset_nifty50 --workers 4
+```
+
+For each announcement the script extracts a normalised event `type`
+(results, dividend, bonus, split, buyback, acquisition, board_meeting, …),
+builds a short `summary` (NEWSSUB + first informative sentences of the PDF
+body, with boilerplate like “Please find attached…” stripped), and pulls
+structured `key_figures` (Revenue, EBITDA, Net Profit, EPS, Dividend/Share,
+Ratio, Record/Ex Date, Order Value, Stake %, …) from BOTH the subject and
+the attached PDF using `pymupdf`. Outputs are skipped if already present
+(use `--force` to regenerate).
 
 ---
 
@@ -254,7 +312,8 @@ dataset_smallcap250/            Smallcap 250 data (gitignored)
 dataset_nifty50/                Nifty 50 data (gitignored)
 
 src/trading_bot/
-  config.py                     YAML config loader
+  cli.py                        CLI entry point (move-predictor | report | kite status)
+  config.py                     YAML config loader (defaults to config/move_predictor.yaml)
   types.py                      Signal, Position, Instrument, Horizon types
   analysis/
     move_correlation.py         Factor definitions (SIMPLE_FACTOR_COLS, BSE_ANNOUNCEMENT_COLS)
@@ -263,11 +322,17 @@ src/trading_bot/
     indicators.py               ATR, gap risk, volume surge
     bse_events.py               BSE announcement feature engine
   models/
-    exit_policy.py              SL/TP sizing, signal construction
+    exit_policy.py              SL/TP sizing, signal construction (ExitPolicy)
   risk/
-    signals.py                  Position sizing helpers
+    engine.py                   Signal approval, exit checks, session counting
+    caps.py                     Exposure / position-count caps
+    sizer.py                    ATR-based position sizing
+  backtest/
+    engine.py                   Fill / exit simulation, equity curve
+    costs.py                    Indian cost model + estimate_cost_per_share()
+    metrics.py                  Sortino, Calmar, win rate, drawdown
   strategies/move_predictor/
-    runner.py                   Main backtest orchestrator
+    runner.py                   Main backtest orchestrator (MovePredictorBacktest)
     features.py                 build_lagged_panel() — full feature matrix
     model.py                    LightGBM wrapper (MovePredictorModel)
     signals.py                  generate_move_predictor_signals()
@@ -289,8 +354,9 @@ dashboard/
   move_analysis.py              Big-moves analysis helpers
 
 scripts/
-  backtest_move_predictor.py    Run backtest → reports/move_predictor/
+  backtest_move_predictor.py    Run backtest (verbose logging) → reports/move_predictor/
   build_equity_dataset.py       End-to-end dataset builder (--skip-ohlcv / --skip-minute / --skip-bse / --skip-screener)
+  regenerate_manifest.py        Rebuild dataset_*/manifest.json from existing files (no re-download)
   kite_login.py                 Kite Connect OAuth login (token expires daily)
   download_index_and_update_ohlcv.py  Update daily OHLCV + index via Kite
   download_kite_ohlcv.py        Download full OHLCV history
@@ -298,6 +364,7 @@ scripts/
   download_screener_excel.py    Download Screener.in exports
   consolidate_screener_excels.py  Merge screener exports into one file
   extract_corporate_actions.py  Extract bonus/split/dividend events from announcements
+  extract_announcements_per_stock.py  Per-stock CSV: date, type, summary, key_figures (subject + PDF body)
   pdf_extract.py                Extract text from BSE announcement PDFs
 
 reports/

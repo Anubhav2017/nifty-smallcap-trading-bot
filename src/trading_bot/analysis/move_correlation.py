@@ -7,6 +7,7 @@ from typing import Iterable, Literal
 import numpy as np
 import pandas as pd
 
+from trading_bot.features.bse_events import BSE_FEATURE_COLS as BSE_ANNOUNCEMENT_COLS
 from trading_bot.features.indicators import add_atr_pct, add_gap_risk, add_volume_surge
 
 TargetKind = Literal["abs_return", "signed_return", "is_significant", "z_score"]
@@ -62,6 +63,19 @@ FACTOR_LABELS = {
     "signed_return": "Signed return on move day",
     "is_significant": "Significant move (0/1)",
     "z_score": "Move z-score",
+    # BSE announcement features
+    "bse_result_blackout": "Results filed (last 3d)",
+    "bse_bulk_buy_last5d": "Bulk/creeping buy (last 5d)",
+    "bse_promoter_buy_7d": "Promoter stake buy (last 7d)",
+    "bse_corp_action_5d": "Corp action (last 5d)",
+    "bse_window_closed": "Trading window closed (last 10d)",
+    "bse_results_5d": "Results filed (last 5d)",
+    "bse_earnings_call_5d": "Earnings call / investor meet (last 5d)",
+    "bse_order_win_10d": "Order / contract win (last 10d)",
+    "bse_acquisition_10d": "Acquisition / merger (last 10d)",
+    "bse_capacity_expansion_15d": "Capacity expansion (last 15d)",
+    "bse_credit_rating_10d": "Credit-rating action (last 10d)",
+    "bse_ann_count_5d": "Announcement count (last 5d)",
 }
 
 # Small set shown in the dashboard (easy to scan).
@@ -80,13 +94,9 @@ SIMPLE_FACTOR_COLS = [
 
 # BSE announcement features — computed post-concat in build_lagged_panel,
 # so kept separate from SIMPLE_FACTOR_COLS (not available in symbol_lagged_frame).
-BSE_ANNOUNCEMENT_COLS = [
-    "bse_result_blackout",  # results filed last 3 days → sell-off zone
-    "bse_bulk_buy_last5d",  # bulk acquisition (SAST Reg 10) → +3.5% signal
-    "bse_promoter_buy_7d",  # promoter increase stake → +0.88% signal
-    "bse_corp_action_5d",   # bonus/dividend/record date → +0.35% signal
-    "bse_window_closed",    # trading window closure → results imminent
-]
+# The canonical list (BSE_ANNOUNCEMENT_COLS) is imported at the top of this
+# module from trading_bot.features.bse_events so the feature builder and the
+# model column set never drift apart.
 
 
 def enrich_technical_factors(df: pd.DataFrame) -> pd.DataFrame:
@@ -341,6 +351,10 @@ def _format_factor_value(col: str, value: float) -> str:
         return "Yes" if value >= 0.5 else "No"
     if col == "days_since_filing":
         return f"{int(value)} days"
+    if col == "bse_ann_count_5d":
+        return f"{value:.1f}"
+    if col.startswith("bse_"):
+        return "Yes" if value >= 0.5 else "No"
     if col.startswith("f_"):
         return f"{value * 100:.1f}%" if abs(value) < 2 else f"{value:.2f}"
     return f"{value:.2f}"
